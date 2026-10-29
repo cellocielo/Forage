@@ -13,9 +13,10 @@ import {
 const BATCH_SIZE = 10;
 const model = Deno.env.get('ENRICH_MODEL') ?? DEFAULT_MODEL;
 
-// Called by pg_cron with the project's secret key; not callable by users.
+// Called by pg_cron with a project secret key; not callable by users.
+// 'secret:*' accepts any secret key, so rotating to a newly named key doesn't break it.
 Deno.serve(
-  withSupabase({ auth: 'secret' }, async (_req, ctx) => {
+  withSupabase({ auth: 'secret:*' }, async (_req, ctx) => {
     // Check before claiming, so a missing key doesn't burn the captures' retry attempts.
     if (!Deno.env.get('ANTHROPIC_API_KEY')) {
       return Response.json({ error: 'ANTHROPIC_API_KEY is not set' }, { status: 500 });
