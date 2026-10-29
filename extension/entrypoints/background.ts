@@ -1,8 +1,10 @@
+import { flushQueue } from '@/lib/capture-queue';
 import { createSaveWordListener } from '@/lib/messaging';
 import { supabase } from '@/lib/supabase';
 
 const MENU_ID = 'forage-save-word';
 const SAVE_COMMAND = 'save-word';
+const SYNC_ALARM = 'forage-sync-captures';
 
 export default defineBackground(() => {
   browser.runtime.onInstalled.addListener(() => {
@@ -22,6 +24,16 @@ export default defineBackground(() => {
   });
 
   browser.runtime.onMessage.addListener(createSaveWordListener(supabase));
+
+  // Sync offline captures when the worker wakes, when the network returns, and every few minutes.
+  browser.alarms.get(SYNC_ALARM).then((alarm) => {
+    if (!alarm) browser.alarms.create(SYNC_ALARM, { periodInMinutes: 5 });
+  });
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === SYNC_ALARM) flushQueue(supabase);
+  });
+  addEventListener('online', () => flushQueue(supabase));
+  flushQueue(supabase);
 });
 
 async function captureInTab(tabId: number) {

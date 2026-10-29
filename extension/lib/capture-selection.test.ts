@@ -33,6 +33,15 @@ describe('captureSelection', () => {
     expect(toastText()).toBe('Saved "ephemeral" to Forage');
   });
 
+  it('says when the word was queued to sync later', async () => {
+    select('ephemeral');
+    vi.mocked(requestSaveWord).mockResolvedValue({ ok: true, word: 'ephemeral', clientCaptureId: 'c', queued: true });
+
+    await captureSelection(window);
+
+    expect(toastText()).toBe(`Saved "ephemeral". It'll sync when you're back online.`);
+  });
+
   it('shows the failure message from the background', async () => {
     select('ephemeral');
     vi.mocked(requestSaveWord).mockResolvedValue({

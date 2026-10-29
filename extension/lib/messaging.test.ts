@@ -47,7 +47,7 @@ describe('createSaveWordListener', () => {
 
     createSaveWordListener(client)({ type: SAVE_WORD, capture: { word: 'x' } }, { id: browser.runtime.id }, sendResponse);
 
-    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ ok: false, reason: 'error' })));
+    await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ ok: false, reason: 'rejected' })));
   });
 });
 
@@ -62,6 +62,6 @@ describe('requestSaveWord', () => {
   it('turns a messaging failure into an error result', async () => {
     vi.spyOn(browser.runtime, 'sendMessage').mockRejectedValue(new Error('Extension context invalidated'));
 
-    await expect(requestSaveWord({ word: 'x' })).resolves.toMatchObject({ ok: false, reason: 'error' });
+    await expect(requestSaveWord({ word: 'x' })).resolves.toMatchObject({ ok: false, reason: 'rejected' });
   });
 });

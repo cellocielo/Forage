@@ -11,7 +11,9 @@ export async function captureSelection(win: Window = window): Promise<void> {
   }
 
   const result = await requestSaveWord(context);
-  if (result.ok) {
+  if (result.ok && result.queued) {
+    showToast(`Saved "${result.word}". It'll sync when you're back online.`, { doc: win.document });
+  } else if (result.ok) {
     showToast(`Saved "${result.word}" to Forage`, { doc: win.document });
   } else {
     showToast(result.message, { variant: 'error', doc: win.document });

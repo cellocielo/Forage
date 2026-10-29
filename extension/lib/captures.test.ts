@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { AuthRetryableFetchError, type SupabaseClient } from '@supabase/supabase-js';
 import { saveWord } from './captures';
 
-function fakeClient({ userId = 'user-1' as string | null, upsertError = null as unknown } = {}) {
-  const upsert = vi.fn().mockResolvedValue({ error: upsertError });
+function fakeClient({
+  userId = 'user-1' as string | null,
+  upsertError = null as unknown,
+  status = 201,
+  sessionError = null as unknown,
+} = {}) {
+  const upsert = vi.fn().mockResolvedValue({ error: upsertError, status });
   const from = vi.fn(() => ({ upsert }));
   const getSession = vi.fn().mockResolvedValue({
     data: { session: userId ? { user: { id: userId } } : null },
-    error: null,
+    error: sessionError,
   });
   const client = { from, auth: { getSession } } as unknown as SupabaseClient;
   return { client, from, upsert };
@@ -89,11 +94,46 @@ describe('saveWord', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
-  it('maps a database error to a retryable message', async () => {
-    const { client } = fakeClient({ upsertError: { message: 'boom' } });
+  it('refuses to save into a different account than requested', async () => {
+    const { client, upsert } = fakeClient({ userId: 'user-2' });
+
+    const result = await saveWord(client, { word: 'ephemeral' }, { userId: 'user-1' });
+
+    expect(result).toMatchObject({ ok: false, reason: 'signed-out' });
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 408, 429, 503])('treats status %i as retryable', async (status) => {
+    const { client } = fakeClient({ upsertError: { message: 'Failed to fetch' }, status });
 
     const result = await saveWord(client, { word: 'ephemeral' });
 
-    expect(result).toEqual({ ok: false, reason: 'error', message: `Couldn't save "ephemeral". Try again.` });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'retryable',
+      message: `Couldn't save "ephemeral". Try again.`,
+      word: 'ephemeral',
+      userId: 'user-1',
+    });
+  });
+
+  it('treats a client error as rejected, not retryable', async () => {
+    const { client } = fakeClient({ upsertError: { message: 'column not found', code: 'PGRST204' }, status: 400 });
+
+    const result = await saveWord(client, { word: 'ephemeral' });
+
+    expect(result).toEqual({ ok: false, reason: 'rejected', message: `Couldn't save "ephemeral". Try again.` });
+  });
+
+  it('treats a token refresh that failed offline as retryable, not signed-out', async () => {
+    const { client, upsert } = fakeClient({
+      userId: null,
+      sessionError: new AuthRetryableFetchError('Failed to fetch', 0),
+    });
+
+    const result = await saveWord(client, { word: 'ephemeral' });
+
+    expect(result).toMatchObject({ ok: false, reason: 'retryable', word: 'ephemeral' });
+    expect(upsert).not.toHaveBeenCalled();
   });
 });

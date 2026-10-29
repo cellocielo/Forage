@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { saveWord, type CaptureInput, type SaveWordResult } from './captures';
+import { captureWord } from './capture-queue';
+import type { CaptureInput, SaveWordResult } from './captures';
 
 export const SAVE_WORD = 'forage:save-word';
 
@@ -23,7 +24,7 @@ export async function requestSaveWord(capture: CaptureInput): Promise<SaveWordRe
     const message: SaveWordMessage = { type: SAVE_WORD, capture };
     return await browser.runtime.sendMessage(message);
   } catch {
-    return { ok: false, reason: 'error', message: "Couldn't reach Forage. Try again." };
+    return { ok: false, reason: 'rejected', message: "Couldn't reach Forage. Try again." };
   }
 }
 
@@ -35,8 +36,8 @@ export function createSaveWordListener(client: SupabaseClient) {
     sendResponse: (result: SaveWordResult) => void,
   ): true | undefined => {
     if (sender.id !== browser.runtime.id || !isSaveWordMessage(message)) return;
-    saveWord(client, message.capture)
-      .catch((): SaveWordResult => ({ ok: false, reason: 'error', message: "Couldn't save. Try again." }))
+    captureWord(client, message.capture)
+      .catch((): SaveWordResult => ({ ok: false, reason: 'rejected', message: "Couldn't save. Try again." }))
       .then(sendResponse);
     return true; // keep the channel open for the async response
   };

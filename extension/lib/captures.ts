@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { isAuthRetryableFetchError, type SupabaseClient } from '@supabase/supabase-js';
 
 // Mirrors the check constraints on public.captures.
 const MAX_WORD = 100;
@@ -17,8 +17,19 @@ export interface CaptureInput {
 }
 
 export type SaveWordResult =
-  | { ok: true; word: string; clientCaptureId: string }
-  | { ok: false; reason: 'signed-out' | 'invalid' | 'error'; message: string };
+  | { ok: true; word: string; clientCaptureId: string; queued?: boolean }
+  | { ok: false; reason: 'invalid' | 'signed-out' | 'rejected'; message: string }
+  // Offline or server trouble: safe to retry later with the same clientCaptureId.
+  | { ok: false; reason: 'retryable'; message: string; word: string; userId?: string };
+
+export interface SaveWordOptions {
+  // Only save if this account is signed in (used when syncing queued captures).
+  userId?: string;
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 0 || status === 408 || status === 429 || status >= 500;
+}
 
 function clip(value: string | null | undefined, max: number): string | null {
   const trimmed = value?.replace(/\s+/g, ' ').trim();
@@ -28,6 +39,7 @@ function clip(value: string | null | undefined, max: number): string | null {
 export async function saveWord(
   client: SupabaseClient,
   input: CaptureInput,
+  options: SaveWordOptions = {},
 ): Promise<SaveWordResult> {
   const word = clip(input.word, Infinity);
   if (!word || word.length > MAX_WORD) {
@@ -35,8 +47,12 @@ export async function saveWord(
   }
 
   const { data, error: sessionError } = await client.auth.getSession();
+  if (sessionError && isAuthRetryableFetchError(sessionError)) {
+    // The access token expired and refreshing it needs the network.
+    return { ok: false, reason: 'retryable', message: `Couldn't save "${word}". Try again.`, word };
+  }
   const userId = data.session?.user.id;
-  if (sessionError || !userId) {
+  if (!userId || (options.userId && options.userId !== userId)) {
     return { ok: false, reason: 'signed-out', message: 'Sign in to Forage to save words.' };
   }
 
@@ -44,7 +60,7 @@ export async function saveWord(
   const sourceUrl = input.sourceUrl && input.sourceUrl.length <= MAX_SOURCE_URL ? input.sourceUrl : null;
 
   // ignoreDuplicates makes a retried capture a no-op: there is no update policy on captures.
-  const { error } = await client.from('captures').upsert(
+  const { error, status } = await client.from('captures').upsert(
     {
       user_id: userId,
       client_capture_id: clientCaptureId,
@@ -59,7 +75,10 @@ export async function saveWord(
   );
 
   if (error) {
-    return { ok: false, reason: 'error', message: `Couldn't save "${word}". Try again.` };
+    const message = `Couldn't save "${word}". Try again.`;
+    return isRetryableStatus(status)
+      ? { ok: false, reason: 'retryable', message, word, userId }
+      : { ok: false, reason: 'rejected', message };
   }
   return { ok: true, word, clientCaptureId };
 }
