@@ -12,11 +12,15 @@ import {
 
 const BATCH_SIZE = 10;
 const model = Deno.env.get('ENRICH_MODEL') ?? DEFAULT_MODEL;
-const anthropic = new Anthropic(); // reads the ANTHROPIC_API_KEY secret
 
 // Called by pg_cron with the project's secret key; not callable by users.
 Deno.serve(
   withSupabase({ auth: 'secret' }, async (_req, ctx) => {
+    // Check before claiming, so a missing key doesn't burn the captures' retry attempts.
+    if (!Deno.env.get('ANTHROPIC_API_KEY')) {
+      return Response.json({ error: 'ANTHROPIC_API_KEY is not set' }, { status: 500 });
+    }
+    const anthropic = new Anthropic();
     const db = ctx.supabaseAdmin;
     const { data, error } = await db.rpc('claim_captures_for_enrichment', { batch_size: BATCH_SIZE });
     if (error) return Response.json({ error: error.message }, { status: 500 });
