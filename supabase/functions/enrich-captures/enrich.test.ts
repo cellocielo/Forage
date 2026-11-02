@@ -17,6 +17,17 @@ const ENRICHMENT: Enrichment = {
   register: 'formal',
   paraphrase: "Something that doesn't last long.",
   examples: ['The fireworks were ephemeral.', 'Her interest in chess was ephemeral.'],
+  frames: ['Their fame was ephemeral because ___.', 'The joy of a new phone is ephemeral; ___.'],
+  scenarios: [
+    { register: 'neutral', situation: 'Tell a friend why a viral trend faded so fast.' },
+    { register: 'formal', situation: 'Write to your manager about a short-lived sales spike.' },
+    { register: 'informal', situation: 'Text your sister about a snowman that melted by noon.' },
+  ],
+  hints: {
+    partners: ['ephemeral nature', 'ephemeral beauty', 'purely ephemeral'],
+    example: 'Cherry blossoms are ephemeral, lasting only a week.',
+    starter: 'Most internet fame is ephemeral, so',
+  },
 };
 
 // deno-lint-ignore no-explicit-any
@@ -61,6 +72,23 @@ Deno.test('generateEnrichment trims the lemma and keeps exactly two examples', a
   assertEquals(result.examples, ['a', 'b']);
 });
 
+Deno.test('generateEnrichment keeps two single-blank frames, three scenarios, and at most five partners', async () => {
+  const { client } = fakeClient({
+    parsed_output: {
+      ...ENRICHMENT,
+      frames: ['No blank here.', 'Two ___ blanks ___.', ...ENRICHMENT.frames, 'Extra ___ frame.'],
+      scenarios: [...ENRICHMENT.scenarios, { register: 'technical', situation: 'Extra.' }],
+      hints: { ...ENRICHMENT.hints, partners: ['a', 'b', 'c', 'd', 'e', 'f'] },
+    },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, ENRICHMENT.frames);
+  assertEquals(result.scenarios, ENRICHMENT.scenarios);
+  assertEquals(result.hints.partners, ['a', 'b', 'c', 'd', 'e']);
+});
+
 Deno.test('generateEnrichment treats a refusal as permanent', async () => {
   const { client } = fakeClient({ stop_reason: 'refusal', parsed_output: null });
   await assertRejects(() => generateEnrichment(client, 'm', 'x', null), PermanentEnrichmentError);
@@ -71,6 +99,9 @@ Deno.test('generateEnrichment rejects truncated, unparsed, or short output as re
     { stop_reason: 'max_tokens', parsed_output: null },
     { parsed_output: null },
     { parsed_output: { ...ENRICHMENT, examples: ['only one'] } },
+    { parsed_output: { ...ENRICHMENT, frames: ['Has ___ blank.', 'No blank.'] } },
+    { parsed_output: { ...ENRICHMENT, scenarios: ENRICHMENT.scenarios.slice(0, 2) } },
+    { parsed_output: { ...ENRICHMENT, hints: { ...ENRICHMENT.hints, partners: [] } } },
   ]) {
     const { client } = fakeClient(response);
     const error = await assertRejects(() => generateEnrichment(client, 'm', 'x', null));
