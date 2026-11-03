@@ -41,6 +41,30 @@ describe('createSaveWordListener', () => {
     expect(upsert).not.toHaveBeenCalled();
   });
 
+  it('calls onSaved after a successful save, but not after a failure', async () => {
+    const { client } = fakeClient();
+    const onSaved = vi.fn();
+    const sendResponse = vi.fn();
+
+    createSaveWordListener(client, onSaved)(
+      { type: SAVE_WORD, capture: { word: 'ephemeral' } },
+      { id: browser.runtime.id },
+      sendResponse,
+    );
+    await vi.waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ ok: true })));
+
+    const failing = { auth: { getSession: () => Promise.reject(new Error('offline')) } } as unknown as SupabaseClient;
+    const onFailedSave = vi.fn();
+    const failedResponse = vi.fn();
+    createSaveWordListener(failing, onFailedSave)(
+      { type: SAVE_WORD, capture: { word: 'x' } },
+      { id: browser.runtime.id },
+      failedResponse,
+    );
+    await vi.waitFor(() => expect(failedResponse).toHaveBeenCalled());
+    expect(onFailedSave).not.toHaveBeenCalled();
+  });
+
   it('responds with an error if saving throws', async () => {
     const client = { auth: { getSession: () => Promise.reject(new Error('offline')) } } as unknown as SupabaseClient;
     const sendResponse = vi.fn();

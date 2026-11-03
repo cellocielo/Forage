@@ -29,7 +29,7 @@ export async function requestSaveWord(capture: CaptureInput): Promise<SaveWordRe
 }
 
 /** Background side: runtime.onMessage listener that performs the save. */
-export function createSaveWordListener(client: SupabaseClient) {
+export function createSaveWordListener(client: SupabaseClient, onSaved?: (result: SaveWordResult) => void) {
   return (
     message: unknown,
     sender: { id?: string },
@@ -38,7 +38,10 @@ export function createSaveWordListener(client: SupabaseClient) {
     if (sender.id !== browser.runtime.id || !isSaveWordMessage(message)) return;
     captureWord(client, message.capture)
       .catch((): SaveWordResult => ({ ok: false, reason: 'rejected', message: "Couldn't save. Try again." }))
-      .then(sendResponse);
+      .then((result) => {
+        sendResponse(result);
+        if (result.ok) onSaved?.(result);
+      });
     return true; // keep the channel open for the async response
   };
 }
