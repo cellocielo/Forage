@@ -5,7 +5,7 @@
 
 body {
   margin: 0;
-  width: 280px;
+  width: 340px;
 }
 
 main {
@@ -46,4 +46,163 @@ button {
 [role='alert'] {
   margin: 0;
   color: #b3261e;
+}
+
+/* Practice card (P1) */
+
+:root {
+  --accent: #2f3b2f;
+  --muted: color-mix(in srgb, currentColor 65%, transparent);
+  --line: color-mix(in srgb, currentColor 18%, transparent);
+  --surface: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #9cc29c;
+  }
+}
+
+.practice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.practice h1,
+.practice p {
+  margin: 0;
+}
+
+.word {
+  font-size: 20px;
+}
+
+.pos {
+  font-size: 13px;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--muted);
+}
+
+.prompt {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface);
+  line-height: 1.45;
+}
+
+.register {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.practice label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+textarea {
+  font: inherit;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.hints {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.hints dt {
+  color: var(--muted);
+}
+
+.hints dd {
+  margin: 0;
+}
+
+.secondary {
+  background: transparent;
+}
+
+.cap {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rating {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.rating-1,
+.rating-2 {
+  color: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .rating-1,
+  .rating-2 {
+    color: #f2b8b5;
+  }
+}
+
+.sentence {
+  margin: 0;
+  font-size: 13px;
+}
+
+.sentence figcaption {
+  color: var(--muted);
+}
+
+.sentence blockquote {
+  margin: 2px 0 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+}
+
+.account {
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.account span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  [role='alert'] {
+    color: #f2b8b5;
+  }
 }

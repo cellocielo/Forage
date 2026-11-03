@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import { Practice } from './Practice';
 
 function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -18,15 +19,15 @@ function App() {
 function SignedIn({ email }: { email?: string }) {
   return (
     <>
-      <p>
-        Signed in as <strong>{email}</strong>
-      </p>
-      <p className="hint">
-        Select a word on any page, then right-click → Save to Forage, or press Alt+Shift+S.
-      </p>
-      <button type="button" onClick={() => supabase.auth.signOut()}>
-        Sign out
-      </button>
+      <Practice />
+      <footer className="account">
+        <span>
+          Signed in as <strong>{email}</strong>
+        </span>
+        <button type="button" className="link" onClick={() => supabase.auth.signOut()}>
+          Sign out
+        </button>
+      </footer>
     </>
   );
 }

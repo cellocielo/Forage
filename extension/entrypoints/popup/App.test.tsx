@@ -11,6 +11,7 @@ const auth = vi.hoisted(() => ({
   signOut: vi.fn(),
 }));
 vi.mock('@/lib/supabase', () => ({ supabase: { auth } }));
+vi.mock('./Practice', () => ({ Practice: () => <p>practice card</p> }));
 
 let emitAuthChange: (session: unknown) => void;
 
@@ -70,6 +71,7 @@ describe('popup', () => {
     emitAuthChange({ user: { email: 'me@example.com' } });
 
     expect(await screen.findByText('me@example.com')).toBeTruthy();
+    expect(screen.getByText('practice card')).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(auth.signOut).toHaveBeenCalled();
   });

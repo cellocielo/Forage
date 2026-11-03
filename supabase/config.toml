@@ -419,3 +419,9 @@ enabled = true
 # doesn't understand; the function authorizes it itself via @supabase/server (auth: 'secret').
 [functions.enrich-captures]
 verify_jwt = false
+
+# Called by signed-in users from the extension. The function verifies their JWT itself
+# against the project's JWKS (@supabase/server, auth: 'user'), which handles the ES256
+# signing keys; the platform check would add nothing and depends on the legacy secret.
+[functions.grade-attempt]
+verify_jwt = false
