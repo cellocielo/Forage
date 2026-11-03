@@ -3,10 +3,13 @@ import { refreshBadge } from '@/lib/badge';
 import {
   chooseTask,
   describeNextReview,
+  disputeAttempt,
+  easierTask,
   fetchNextCard,
   hintSteps,
   RATING_LABELS,
   submitAttempt,
+  type DisputeResult,
   type GradeResult,
   type PracticeCard,
   type Task,
@@ -18,7 +21,7 @@ type View =
   | { kind: 'empty' }
   | { kind: 'error'; message: string }
   | { kind: 'task'; card: PracticeCard; task: Task }
-  | { kind: 'result'; card: PracticeCard; result: GradeResult };
+  | { kind: 'result'; card: PracticeCard; task: Task; result: GradeResult };
 
 /** One practice card (P1): the next ready word, a scaffolded task, hints, and the grade. */
 export function Practice() {
@@ -65,15 +68,15 @@ export function Practice() {
         <TaskCard
           key={view.card.id}
           card={view.card}
-          task={view.task}
-          onGraded={(result) => {
-            setView({ kind: 'result', card: view.card, result });
+          initialTask={view.task}
+          onGraded={(task, result) => {
+            setView({ kind: 'result', card: view.card, task, result });
             refreshBadge(supabase);
           }}
         />
       );
     case 'result':
-      return <ResultCard card={view.card} result={view.result} onNext={loadNext} />;
+      return <ResultCard card={view.card} task={view.task} result={view.result} onNext={loadNext} />;
   }
 }
 
@@ -87,13 +90,15 @@ function WordHeading({ card }: { card: PracticeCard }) {
 
 function TaskCard({
   card,
-  task,
+  initialTask,
   onGraded,
 }: {
   card: PracticeCard;
-  task: Task;
-  onGraded: (result: GradeResult) => void;
+  initialTask: Task;
+  onGraded: (task: Task, result: GradeResult) => void;
 }) {
+  const [task, setTask] = useState(initialTask);
+  const [easier, setEasier] = useState(false);
   const [answer, setAnswer] = useState('');
   const [hintsShown, setHintsShown] = useState(0);
   const [pending, setPending] = useState(false);
@@ -101,21 +106,59 @@ function TaskCard({
   const answerId = useId();
   const steps = hintSteps(card);
   const nextHint = steps[hintsShown];
+  const easierOption = easierTask(card, task);
 
-  async function submit(event?: FormEvent) {
-    event?.preventDefault();
-    if (!answer.trim() || pending) return;
+  async function send(text: string) {
+    if (!text.trim() || pending) return;
     setPending(true);
     setError(null);
-    const outcome = await submitAttempt(supabase, card, task, answer, hintsShown);
+    const outcome = await submitAttempt(supabase, card, task, text, hintsShown, easier);
     setPending(false);
-    if (outcome.ok) onGraded(outcome.result);
+    if (outcome.ok) onGraded(task, outcome.result);
     else setError(outcome.message);
+  }
+
+  function submit(event?: FormEvent) {
+    event?.preventDefault();
+    send(answer);
   }
 
   // Enter checks a frame's one-line answer; sentences use Cmd/Ctrl+Enter so Enter can add a line.
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submit();
+  }
+
+  function makeEasier() {
+    if (!easierOption) return;
+    setTask(easierOption);
+    setEasier(true);
+    setAnswer('');
+    setHintsShown(0);
+    setError(null);
+  }
+
+  const easierButton = easierOption && (
+    <button type="button" className="link" disabled={pending} onClick={makeEasier}>
+      Easier, please
+    </button>
+  );
+
+  if (task.type === 'choice') {
+    return (
+      <section className="practice">
+        <WordHeading card={card} />
+        <p className="prompt">{task.prompt}</p>
+        <div className="choices">
+          {task.options!.map((option) => (
+            <button key={option} type="button" className="choice" disabled={pending} onClick={() => send(option)}>
+              {option}
+            </button>
+          ))}
+        </div>
+        {pending && <p className="hint">Checking…</p>}
+        {error && <p role="alert">{error}</p>}
+      </section>
+    );
   }
 
   return (
@@ -179,14 +222,40 @@ function TaskCard({
           </button>
         )}
       </div>
+      {easierButton}
     </form>
   );
 }
 
-function ResultCard({ card, result, onNext }: { card: PracticeCard; result: GradeResult; onNext: () => void }) {
+function ResultCard({
+  card,
+  task,
+  result,
+  onNext,
+}: {
+  card: PracticeCard;
+  task: Task;
+  result: GradeResult;
+  onNext: () => void;
+}) {
+  const [dispute, setDispute] = useState<
+    { kind: 'idle' } | { kind: 'pending' } | { kind: 'error'; message: string } | { kind: 'done'; result: DisputeResult }
+  >({ kind: 'idle' });
+  const isChoice = task.type === 'choice';
   const label = RATING_LABELS[result.rating] ?? '';
   const corrected = result.verdict.corrected_sentence.trim();
   const changed = corrected !== '' && corrected !== result.sentence.trim();
+
+  async function disagree() {
+    setDispute({ kind: 'pending' });
+    const outcome = await disputeAttempt(supabase, result.attempt_id);
+    if (!outcome.ok) {
+      setDispute({ kind: 'error', message: outcome.message });
+      return;
+    }
+    setDispute({ kind: 'done', result: outcome.result });
+    if (outcome.result.rescheduled) refreshBadge(supabase);
+  }
 
   return (
     <section className="practice" aria-live="polite">
@@ -194,19 +263,48 @@ function ResultCard({ card, result, onNext }: { card: PracticeCard; result: Grad
       <p className={`rating rating-${result.rating}`}>{label}</p>
       <p>{result.verdict.rationale}</p>
       <figure className="sentence">
-        <figcaption>You wrote</figcaption>
+        <figcaption>{isChoice ? 'You picked' : 'You wrote'}</figcaption>
         <blockquote>{result.sentence}</blockquote>
       </figure>
       {changed && (
         <figure className="sentence">
-          <figcaption>Suggested</figcaption>
+          <figcaption>{isChoice ? 'Correct usage' : 'Suggested'}</figcaption>
           <blockquote>{corrected}</blockquote>
         </figure>
       )}
       <p className="hint">Next review {describeNextReview(result.scheduled_days)}.</p>
-      <button type="button" autoFocus onClick={onNext}>
-        Next word
-      </button>
+
+      {dispute.kind === 'done' && <SecondOpinion dispute={dispute.result} />}
+      {dispute.kind === 'error' && <p role="alert">{dispute.message}</p>}
+
+      <div className="actions">
+        <button type="button" autoFocus onClick={onNext}>
+          Next word
+        </button>
+        {!isChoice && (dispute.kind === 'idle' || dispute.kind === 'error') && (
+          <button type="button" className="secondary" onClick={disagree}>
+            I disagree
+          </button>
+        )}
+        {dispute.kind === 'pending' && <span className="hint">Getting a second opinion…</span>}
+      </div>
     </section>
+  );
+}
+
+function SecondOpinion({ dispute }: { dispute: DisputeResult }) {
+  let outcome: string;
+  if (!dispute.changed) outcome = 'It agrees with the first grade.';
+  else if (dispute.rescheduled && dispute.scheduled_days !== null) {
+    outcome = `Your next review is now ${describeNextReview(dispute.scheduled_days)}.`;
+  } else outcome = "You've reviewed this word since, so its schedule stays as it is.";
+
+  return (
+    <div className="second-opinion">
+      <p>
+        <strong>Second opinion: {RATING_LABELS[dispute.rating]}</strong>. {outcome}
+      </p>
+      <p>{dispute.verdict.rationale}</p>
+    </div>
   );
 }

@@ -30,6 +30,11 @@ const ENRICHMENT: Enrichment = {
     example: 'Cherry blossoms are ephemeral, lasting only a week.',
     starter: 'Most internet fame is ephemeral, so',
   },
+  usage_choice: {
+    correct: 'The rainbow was ephemeral and faded in minutes.',
+    incorrect: 'He ephemeraled the meeting until Friday.',
+    mistake: '"Ephemeral" is an adjective, so it cannot be used as a verb.',
+  },
 };
 
 const FRAMES = ['Their fame was ephemeral because ___.', 'The joy of a new phone is ephemeral; ___.'];
@@ -117,6 +122,38 @@ Deno.test('generateEnrichment falls back to the starter when every frame bracket
   const result = await generateEnrichment(client, 'm', 'ephemeral', null);
 
   assertEquals(result.frames, ['Most internet fame is ephemeral, so ___']);
+});
+
+Deno.test('the prompt says to describe the saved word even when the sentence is about another word', async () => {
+  const { client, calls } = fakeClient({});
+
+  await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertStringIncludes(calls[0].system, 'Always describe the saved word itself');
+});
+
+Deno.test('generateEnrichment trims the usage choice', async () => {
+  const { client } = fakeClient({
+    parsed_output: {
+      ...ENRICHMENT,
+      usage_choice: { correct: ' Fame is ephemeral. ', incorrect: ' She ephemeraled it. ', mistake: ' Not a verb. ' },
+    },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.usage_choice, { correct: 'Fame is ephemeral.', incorrect: 'She ephemeraled it.', mistake: 'Not a verb.' });
+});
+
+Deno.test('generateEnrichment rejects a usage choice that drops the word or repeats itself', async () => {
+  for (const usage_choice of [
+    { ...ENRICHMENT.usage_choice, incorrect: 'He postponed the meeting until Friday.' },
+    { ...ENRICHMENT.usage_choice, correct: 'The rainbow faded in minutes.' },
+    { ...ENRICHMENT.usage_choice, incorrect: ENRICHMENT.usage_choice.correct },
+  ]) {
+    const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, usage_choice } });
+    await assertRejects(() => generateEnrichment(client, 'm', 'ephemeral', null), Error, 'usage choice');
+  }
 });
 
 Deno.test('toFrame blanks the bracketed meaning and keeps the word', () => {

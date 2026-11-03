@@ -425,3 +425,7 @@ verify_jwt = false
 # signing keys; the platform check would add nothing and depends on the legacy secret.
 [functions.grade-attempt]
 verify_jwt = false
+
+# Same as grade-attempt: signed-in users, JWT verified inside the function.
+[functions.dispute-attempt]
+verify_jwt = false

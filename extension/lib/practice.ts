@@ -1,11 +1,19 @@
 import { FunctionsHttpError, type SupabaseClient } from '@supabase/supabase-js';
 import { countReadyWords } from './badge';
 
-export type TaskType = 'frame' | 'scenario' | 'open';
+/** Easiest first: pick the right usage, fill a frame, write for a scenario, write freely. */
+export const TASK_LEVELS = ['choice', 'frame', 'scenario', 'open'] as const;
+export type TaskType = (typeof TASK_LEVELS)[number];
 
 export interface Scenario {
   register: string;
   situation: string;
+}
+
+export interface UsageChoice {
+  correct: string;
+  incorrect: string;
+  mistake: string;
 }
 
 export interface PracticeCard {
@@ -17,6 +25,7 @@ export interface PracticeCard {
   partOfSpeech: string;
   frames: string[];
   scenarios: Scenario[];
+  usageChoice: UsageChoice | null;
   hints: { partners: string[]; example: string | null; starter: string | null };
 }
 
@@ -25,6 +34,8 @@ export interface Task {
   index: number;
   prompt: string;
   register?: string;
+  /** Choice tasks: the two sentences, in the order shown. */
+  options?: [string, string];
 }
 
 // Mirrors scaffoldLevel in supabase/functions/_shared/scheduling.ts; keep the thresholds in step.
@@ -32,29 +43,75 @@ const FRAME_BELOW_DAYS = 7;
 const SCENARIO_BELOW_DAYS = 21;
 const STATE_NEW = 0;
 
+function hasLevel(card: PracticeCard, type: TaskType): boolean {
+  switch (type) {
+    case 'choice':
+      return card.usageChoice !== null;
+    case 'frame':
+      return card.frames.length > 0;
+    case 'scenario':
+      return card.scenarios.length > 0;
+    case 'open':
+      return true;
+  }
+}
+
+/** Stable per card and review, so the correct sentence isn't always first. */
+function choiceFlipped(card: PracticeCard): boolean {
+  let hash = card.reps;
+  for (const ch of card.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  return (hash & 1) === 1;
+}
+
+function buildTask(card: PracticeCard, type: TaskType): Task {
+  // New and weak words alternate between a frame and a usage choice (P8), so frames
+  // advance every other review when both exist.
+  const frameTurn = card.usageChoice ? Math.floor(card.reps / 2) : card.reps;
+  switch (type) {
+    case 'choice': {
+      const { correct, incorrect } = card.usageChoice!;
+      const options: [string, string] = choiceFlipped(card) ? [incorrect, correct] : [correct, incorrect];
+      return { type, index: 0, prompt: `Which sentence uses "${card.word}" correctly?`, options };
+    }
+    case 'frame': {
+      const index = frameTurn % card.frames.length;
+      return { type, index, prompt: card.frames[index]! };
+    }
+    case 'scenario': {
+      const index = card.reps % card.scenarios.length;
+      const scenario = card.scenarios[index]!;
+      return { type, index, prompt: scenario.situation, register: scenario.register };
+    }
+    case 'open':
+      return { type, index: 0, prompt: `Write a sentence using "${card.word}".` };
+  }
+}
+
+function baseLevel(card: PracticeCard): number {
+  if (card.state === STATE_NEW || card.stability < FRAME_BELOW_DAYS) {
+    return card.usageChoice && card.reps % 2 === 1 ? 0 : 1;
+  }
+  return card.stability < SCENARIO_BELOW_DAYS ? 2 : 3;
+}
+
 /**
- * The task for this review (P8, P12): frames for new and weak words, scenarios in the middle,
- * an open prompt for strong ones. Falls back a level when a sense lacks that scaffold, and
- * rotates through the frames or scenarios as the card is reviewed.
+ * The task for this review (P8, P12): frames (alternating with a usage choice) for new and
+ * weak words, scenarios in the middle, an open prompt for strong ones. Moves up a level when
+ * a sense lacks that scaffold, and rotates through frames and scenarios as the card is reviewed.
  */
 export function chooseTask(card: PracticeCard): Task {
-  const level =
-    card.state === STATE_NEW || card.stability < FRAME_BELOW_DAYS
-      ? 'frame'
-      : card.stability < SCENARIO_BELOW_DAYS
-        ? 'scenario'
-        : 'open';
+  let level = baseLevel(card);
+  while (!hasLevel(card, TASK_LEVELS[level]!)) level++;
+  return buildTask(card, TASK_LEVELS[level]!);
+}
 
-  if (level === 'frame' && card.frames.length > 0) {
-    const index = card.reps % card.frames.length;
-    return { type: 'frame', index, prompt: card.frames[index]! };
+/** "Easier, please" (P12): the next easier task this word has, or null if this is the easiest. */
+export function easierTask(card: PracticeCard, task: Task): Task | null {
+  for (let level = TASK_LEVELS.indexOf(task.type) - 1; level >= 0; level--) {
+    const type = TASK_LEVELS[level]!;
+    if (hasLevel(card, type)) return buildTask(card, type);
   }
-  if (level !== 'open' && card.scenarios.length > 0) {
-    const index = card.reps % card.scenarios.length;
-    const scenario = card.scenarios[index]!;
-    return { type: 'scenario', index, prompt: scenario.situation, register: scenario.register };
-  }
-  return { type: 'open', index: 0, prompt: `Write a sentence using "${card.word}".` };
+  return null;
 }
 
 const CARD_SELECT = `
@@ -62,7 +119,7 @@ const CARD_SELECT = `
   captures!inner (
     word,
     lemmas ( lemma ),
-    senses!inner ( part_of_speech, frames, scenarios, hint_partners, hint_example, hint_starter )
+    senses!inner ( part_of_speech, frames, scenarios, usage_choice, hint_partners, hint_example, hint_starter )
   )
 `;
 
@@ -78,6 +135,7 @@ interface CardQueryRow {
       part_of_speech: string;
       frames: string[] | null;
       scenarios: Scenario[] | null;
+      usage_choice: UsageChoice | null;
       hint_partners: string[] | null;
       hint_example: string | null;
       hint_starter: string | null;
@@ -97,6 +155,7 @@ function toPracticeCard(row: CardQueryRow): PracticeCard {
     partOfSpeech: sense.part_of_speech,
     frames: sense.frames ?? [],
     scenarios: sense.scenarios ?? [],
+    usageChoice: sense.usage_choice ?? null,
     hints: {
       partners: sense.hint_partners ?? [],
       example: sense.hint_example,
@@ -146,31 +205,62 @@ export interface GradeResult {
   scheduled_days: number;
 }
 
-export type SubmitResult = { ok: true; result: GradeResult } | { ok: false; message: string };
+export type CallResult<T> = { ok: true; result: T } | { ok: false; message: string };
+export type SubmitResult = CallResult<GradeResult>;
 
-export async function submitAttempt(
+/** Calls an Edge Function, turning its { error } body or a network failure into a message. */
+async function callFunction<T>(client: SupabaseClient, name: string, body: object, fallback: string): Promise<CallResult<T>> {
+  const { data, error } = await client.functions.invoke<T>(name, { body });
+  if (!error && data) return { ok: true, result: data };
+
+  if (error instanceof FunctionsHttpError) {
+    const payload = await (error.context as Response).json().catch(() => null);
+    if (payload && typeof payload.error === 'string') return { ok: false, message: payload.error };
+  }
+  return { ok: false, message: fallback };
+}
+
+export function submitAttempt(
   client: SupabaseClient,
   card: PracticeCard,
   task: Task,
   answer: string,
   hintsUsed: number,
+  easier = false,
 ): Promise<SubmitResult> {
-  const { data, error } = await client.functions.invoke<GradeResult>('grade-attempt', {
-    body: {
+  return callFunction<GradeResult>(
+    client,
+    'grade-attempt',
+    {
       card_id: card.id,
       task_type: task.type,
       prompt_index: task.index,
       answer: answer.trim(),
-      hints_used: hintsUsed,
+      hints_used: task.type === 'choice' ? 0 : hintsUsed,
+      easier,
     },
-  });
-  if (!error && data) return { ok: true, result: data };
+    "Couldn't grade right now. Check your connection and try again.",
+  );
+}
 
-  if (error instanceof FunctionsHttpError) {
-    const body = await (error.context as Response).json().catch(() => null);
-    if (body && typeof body.error === 'string') return { ok: false, message: body.error };
-  }
-  return { ok: false, message: "Couldn't grade right now. Check your connection and try again." };
+export interface DisputeResult {
+  verdict: Verdict;
+  score: number;
+  rating: number;
+  changed: boolean;
+  rescheduled: boolean;
+  due: string | null;
+  scheduled_days: number | null;
+}
+
+/** "I disagree with this grade" (G3): a second opinion from a stronger model, which is final. */
+export function disputeAttempt(client: SupabaseClient, attemptId: string): Promise<CallResult<DisputeResult>> {
+  return callFunction<DisputeResult>(
+    client,
+    'dispute-attempt',
+    { attempt_id: attemptId },
+    "Couldn't get a second opinion right now. Check your connection and try again.",
+  );
 }
 
 export const RATING_LABELS: Record<number, string> = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };

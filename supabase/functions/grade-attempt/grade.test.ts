@@ -4,8 +4,11 @@ import type { CardRow } from '../_shared/scheduling.ts';
 import {
   buildUserMessage,
   type CardToGrade,
+  choiceVerdict,
   fillFrame,
+  generateSecondOpinion,
   type GradeDeps,
+  type GradeRequest,
   gradeAttempt,
   GradeRequestSchema,
   GradingRefusedError,
@@ -27,6 +30,11 @@ const SENSE: PracticeSense = {
     { register: 'formal', situation: 'Email the league office about a bad call.' },
     { register: 'informal', situation: 'Text your roommate about the repair bill.' },
   ],
+  usage_choice: {
+    correct: 'The referee made an egregious error.',
+    incorrect: 'She gave an egregious speech that everyone loved.',
+    mistake: '"Egregious" means shockingly bad, so it cannot praise a speech.',
+  },
 };
 
 const NEW_CARD: CardRow = {
@@ -53,12 +61,13 @@ const VERDICT: Verdict = {
   score: 4,
 };
 
-const REQUEST = {
+const REQUEST: GradeRequest = {
   card_id: '00000000-0000-4000-8000-000000000001',
-  task_type: 'frame' as const,
+  task_type: 'frame',
   prompt_index: 0,
   answer: 'the crowd booed.',
   hints_used: 0,
+  easier: false,
 };
 
 function fakeDeps(overrides: Partial<GradeDeps> = {}) {
@@ -212,4 +221,71 @@ Deno.test('generateVerdict handles refusals, truncation, schema misses, and bad 
   await assertRejects(() => run({ stop_reason: 'max_tokens', parsed_output: null }), Error, 'cut off');
   await assertRejects(() => run({ stop_reason: 'end_turn', parsed_output: null }), Error, 'schema');
   await assertRejects(() => run({ stop_reason: 'end_turn', parsed_output: { ...VERDICT, score: 5 } }), Error, 'out-of-range');
+});
+
+Deno.test('taskFor offers a choice task only when the sense has a usage pair', () => {
+  assertEquals(taskFor(SENSE, 'choice', 0), { type: 'choice', prompt: 'Which sentence uses "egregious" correctly?' });
+  assertEquals(taskFor({ ...SENSE, usage_choice: null }, 'choice', 0), null);
+  assertEquals(taskFor(SENSE, 'choice', 1), null);
+});
+
+Deno.test('choiceVerdict scores the correct pick Good and the other Again, explaining the mistake', () => {
+  const right = choiceVerdict(SENSE.usage_choice!, SENSE.usage_choice!.correct)!;
+  assertEquals([right.score, right.sense, right.rationale], [3, 'correct', SENSE.usage_choice!.mistake]);
+  const wrong = choiceVerdict(SENSE.usage_choice!, SENSE.usage_choice!.incorrect)!;
+  assertEquals([wrong.score, wrong.sense, wrong.corrected_sentence], [1, 'wrong', SENSE.usage_choice!.correct]);
+  assertEquals(choiceVerdict(SENSE.usage_choice!, 'Something else.'), null);
+});
+
+Deno.test('gradeAttempt grades a choice without calling the model and ignores hints', async () => {
+  const { deps, verdicts, recorded } = fakeDeps();
+
+  const outcome = await gradeAttempt(
+    { ...REQUEST, task_type: 'choice', answer: SENSE.usage_choice!.correct, hints_used: 3 },
+    deps,
+  );
+
+  assert(outcome.ok);
+  assertEquals(outcome.rating, Rating.Good);
+  assertEquals(verdicts.length, 0);
+  assertEquals(recorded[0]![2].hints_used, 0);
+  assertEquals(recorded[0]![2].sentence, SENSE.usage_choice!.correct);
+});
+
+Deno.test('gradeAttempt rejects a choice that is neither sentence', async () => {
+  const { deps, recorded } = fakeDeps();
+  const outcome = await gradeAttempt({ ...REQUEST, task_type: 'choice', answer: 'Made up.' }, deps);
+  assertEquals(outcome.ok ? 200 : outcome.status, 400);
+  assertEquals(recorded.length, 0);
+});
+
+Deno.test('gradeAttempt records whether the learner asked for an easier task', async () => {
+  const { deps, recorded } = fakeDeps();
+  await gradeAttempt(GradeRequestSchema.parse({ ...REQUEST, easier: true }), deps);
+  assertEquals(recorded[0]![2].easier, true);
+  assertEquals(GradeRequestSchema.parse(REQUEST).easier, false);
+});
+
+Deno.test('generateSecondOpinion uses the beta API with default fallbacks and a fresh-grade note', async () => {
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  const client = {
+    beta: {
+      messages: {
+        parse: (params: unknown) => {
+          calls.push(params);
+          return Promise.resolve({ stop_reason: 'end_turn', parsed_output: VERDICT });
+        },
+      },
+    },
+  } as unknown as Parameters<typeof generateSecondOpinion>[0];
+
+  const verdict = await generateSecondOpinion(client, 'claude-opus-5-5', SENSE, taskFor(SENSE, 'open', 0)!, 'x', 'x');
+
+  assertEquals(verdict, VERDICT);
+  assertEquals(calls[0].model, 'claude-opus-5-5');
+  assertEquals(calls[0].fallbacks, 'default');
+  assertEquals(calls[0].betas, ['server-side-fallback-2026-07-01']);
+  assertEquals(calls[0].output_config.effort, 'medium');
+  assertStringIncludes(calls[0].system, 'second opinion');
 });

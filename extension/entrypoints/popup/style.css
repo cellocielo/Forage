@@ -206,3 +206,35 @@ button.link {
     color: #f2b8b5;
   }
 }
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.choice {
+  text-align: left;
+  line-height: 1.4;
+  padding: 10px 12px;
+}
+
+.second-opinion {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.second-opinion p {
+  margin: 0;
+}
+
+.practice > button.link {
+  align-self: flex-start;
+  font-size: 13px;
+  color: var(--muted);
+}

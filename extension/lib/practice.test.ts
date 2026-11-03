@@ -3,6 +3,8 @@ import { FunctionsFetchError, FunctionsHttpError, type SupabaseClient } from '@s
 import {
   chooseTask,
   describeNextReview,
+  disputeAttempt,
+  easierTask,
   fetchNextCard,
   hintSteps,
   submitAttempt,
@@ -22,7 +24,14 @@ const CARD: PracticeCard = {
     { register: 'neutral', situation: 'Tell a friend.' },
     { register: 'informal', situation: 'Text your roommate.' },
   ],
+  usageChoice: null,
   hints: { partners: ['an egregious error', 'egregious behavior'], example: 'It was egregious.', starter: 'The call was' },
+};
+
+const CHOICE = {
+  correct: 'The referee made an egregious error.',
+  incorrect: 'She gave an egregious speech that everyone loved.',
+  mistake: '"Egregious" means shockingly bad.',
 };
 
 describe('chooseTask', () => {
@@ -51,6 +60,43 @@ describe('chooseTask', () => {
   it('falls back a level when the sense lacks that scaffold', () => {
     expect(chooseTask({ ...CARD, frames: [] })).toMatchObject({ type: 'scenario' });
     expect(chooseTask({ ...CARD, frames: [], scenarios: [] })).toMatchObject({ type: 'open' });
+  });
+
+  it('alternates frames with a usage choice for new and weak words, advancing frames every other review', () => {
+    const card = { ...CARD, usageChoice: CHOICE };
+    const types = [0, 1, 2, 3].map((reps) => chooseTask({ ...card, state: reps ? 2 : 0, stability: 2, reps }));
+    expect(types.map((t) => [t.type, t.index])).toEqual([
+      ['frame', 0],
+      ['choice', 0],
+      ['frame', 1],
+      ['choice', 0],
+    ]);
+  });
+
+  it('offers both sentences in a choice, in an order that varies by card', () => {
+    const orders = ['a', 'b', 'c', 'd', 'e', 'f'].map(
+      (id) => chooseTask({ ...CARD, id, usageChoice: CHOICE, reps: 1, state: 2, stability: 2 }).options!,
+    );
+    for (const options of orders) expect([...options].sort()).toEqual([CHOICE.correct, CHOICE.incorrect].sort());
+    expect(new Set(orders.map((o) => o[0])).size).toBe(2);
+  });
+});
+
+describe('easierTask', () => {
+  it('drops one level at a time to the easiest the word has', () => {
+    const card = { ...CARD, usageChoice: CHOICE, state: 2, stability: 30 };
+    const open = chooseTask(card);
+    const scenario = easierTask(card, open)!;
+    const frame = easierTask(card, scenario)!;
+    const choice = easierTask(card, frame)!;
+    expect([open.type, scenario.type, frame.type, choice.type]).toEqual(['open', 'scenario', 'frame', 'choice']);
+    expect(easierTask(card, choice)).toBeNull();
+  });
+
+  it('skips levels the word lacks', () => {
+    const card = { ...CARD, frames: [], state: 2, stability: 30 };
+    expect(easierTask(card, chooseTask(card))?.type).toBe('scenario');
+    expect(easierTask(card, easierTask(card, chooseTask(card))!)).toBeNull();
   });
 });
 
@@ -121,6 +167,7 @@ describe('fetchNextCard', () => {
         part_of_speech: 'adjective',
         frames: CARD.frames,
         scenarios: CARD.scenarios,
+        usage_choice: null,
         hint_partners: CARD.hints.partners,
         hint_example: CARD.hints.example,
         hint_starter: CARD.hints.starter,
@@ -157,10 +204,20 @@ describe('submitAttempt', () => {
     const invoke = vi.fn().mockResolvedValue({ data: result, error: null });
     const client = { functions: { invoke } } as unknown as SupabaseClient;
 
-    expect(await submitAttempt(client, CARD, task, '  the crowd booed ', 2)).toEqual({ ok: true, result });
+    expect(await submitAttempt(client, CARD, task, '  the crowd booed ', 2, true)).toEqual({ ok: true, result });
     expect(invoke).toHaveBeenCalledWith('grade-attempt', {
-      body: { card_id: 'card-1', task_type: 'frame', prompt_index: 0, answer: 'the crowd booed', hints_used: 2 },
+      body: { card_id: 'card-1', task_type: 'frame', prompt_index: 0, answer: 'the crowd booed', hints_used: 2, easier: true },
     });
+  });
+
+  it('sends the picked sentence for a choice, with no hints', async () => {
+    const invoke = vi.fn().mockResolvedValue({ data: { attempt_id: 'a1' }, error: null });
+    const client = { functions: { invoke } } as unknown as SupabaseClient;
+    const card = { ...CARD, usageChoice: CHOICE, reps: 1 };
+
+    await submitAttempt(client, card, chooseTask(card), CHOICE.correct, 2);
+
+    expect(invoke.mock.calls[0]![1].body).toMatchObject({ task_type: 'choice', answer: CHOICE.correct, hints_used: 0, easier: false });
   });
 
   it("shows the function's error message", async () => {
@@ -175,5 +232,20 @@ describe('submitAttempt', () => {
     const client = { functions: { invoke: vi.fn().mockResolvedValue({ data: null, error }) } } as unknown as SupabaseClient;
 
     expect(await submitAttempt(client, CARD, task, 'x', 0)).toMatchObject({ ok: false, message: expect.stringContaining('connection') });
+  });
+});
+
+describe('disputeAttempt', () => {
+  it('asks dispute-attempt for a second opinion and reports its error message', async () => {
+    const result = { rating: 4, changed: true };
+    const invoke = vi.fn().mockResolvedValueOnce({ data: result, error: null }).mockResolvedValueOnce({
+      data: null,
+      error: new FunctionsHttpError(Response.json({ error: 'You already disputed this grade' }, { status: 409 })),
+    });
+    const client = { functions: { invoke } } as unknown as SupabaseClient;
+
+    expect(await disputeAttempt(client, 'a1')).toEqual({ ok: true, result });
+    expect(invoke).toHaveBeenCalledWith('dispute-attempt', { body: { attempt_id: 'a1' } });
+    expect(await disputeAttempt(client, 'a1')).toEqual({ ok: false, message: 'You already disputed this grade' });
   });
 });

@@ -9,6 +9,7 @@ import {
   GradeRequestSchema,
   GradingRefusedError,
   generateVerdict,
+  type PracticeSense,
   PROMPT_VERSION,
 } from './grade.ts';
 
@@ -19,7 +20,7 @@ const CARD_SELECT = `
   id, due, stability, difficulty, scheduled_days, learning_steps, reps, lapses, state, last_review, archived_at,
   captures!inner (
     lemmas ( lemma ),
-    senses ( id, part_of_speech, definition, frames, scenarios )
+    senses ( id, part_of_speech, definition, frames, scenarios, usage_choice )
   )
 `;
 
@@ -47,7 +48,7 @@ Deno.serve(
           archived_at: string | null;
           captures: {
             lemmas: { lemma: string } | null;
-            senses: { id: string; part_of_speech: string; definition: string; frames: string[] | null; scenarios: Array<{ register: string; situation: string }> | null } | null;
+            senses: Omit<PracticeSense, 'lemma'> | null;
           };
         };
         const sense = captures.senses && captures.lemmas ? { ...captures.senses, lemma: captures.lemmas.lemma } : null;
