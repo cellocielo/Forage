@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { countReadyWords, isAuthStorageKey, refreshBadge } from './badge';
@@ -13,11 +13,19 @@ function fakeClient({
   due = { count: 0, error: null } as CountResult,
   reviewedToday = { count: 0, error: null } as CountResult,
   signedIn = true,
+  settings = null as Record<string, unknown> | null,
 } = {}) {
   const queries: Array<Array<[string, ...unknown[]]>> = [];
   const from = vi.fn((table: string) => {
     const calls: Array<[string, ...unknown[]]> = [['from', table]];
     queries.push(calls);
+    if (table === 'user_settings') {
+      const settingsBuilder = {
+        select: () => settingsBuilder,
+        maybeSingle: () => Promise.resolve({ data: settings, error: null }),
+      };
+      return settingsBuilder;
+    }
     const builder = {
       then(resolve: (value: CountResult) => unknown, reject: (reason: unknown) => unknown) {
         const isDue = calls.some(([name, column]) => name === 'lte' && column === 'due');
@@ -92,7 +100,26 @@ describe('countReadyWords', () => {
   });
 });
 
+const SETTINGS_ROW = {
+  spare_minute: null,
+  reminder_every_hours: 5,
+  daily_cap: 5,
+  weekends: false,
+  quiet_start: '21:00:00',
+  quiet_end: '08:00:00',
+  paused_until: null,
+  badge_enabled: true,
+  end_of_reading_enabled: true,
+  corner_reminder_enabled: true,
+};
+
 describe('refreshBadge', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 3, 14, 0)); // a Tuesday
+  });
+  afterEach(() => vi.useRealTimers());
+
   it('shows the number of ready words', async () => {
     await refreshBadge(fakeClient({ due: { count: 2, error: null } }).client);
     expect(await badgeText()).toBe('2');
@@ -132,9 +159,38 @@ describe('refreshBadge', () => {
     await Promise.all([a, b]);
 
     // The rerun uses the first caller's client; both are the same singleton in the app.
-    expect(first.from).toHaveBeenCalledTimes(4);
+    // Each run reads settings, then the two counts.
+    expect(first.from).toHaveBeenCalledTimes(6);
     expect(second.from).not.toHaveBeenCalled();
     expect(await badgeText()).toBe('1');
+  });
+});
+
+describe('refreshBadge with settings', () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ['Date'] }));
+  afterEach(() => vi.useRealTimers());
+
+  it('uses the daily cap from settings', async () => {
+    vi.setSystemTime(new Date(2026, 10, 3, 14, 0));
+    await refreshBadge(fakeClient({ due: { count: 9, error: null }, settings: { ...SETTINGS_ROW, daily_cap: 8 } }).client);
+    expect(await badgeText()).toBe('8');
+  });
+
+  it('stays blank when the badge is off, while paused, and on weekends off', async () => {
+    vi.setSystemTime(new Date(2026, 10, 3, 14, 0));
+    const due = { count: 3, error: null };
+    await refreshBadge(fakeClient({ due, settings: { ...SETTINGS_ROW, badge_enabled: false } }).client);
+    expect(await badgeText()).toBe('');
+
+    const paused_until = new Date(2026, 10, 5).toISOString();
+    await refreshBadge(fakeClient({ due, settings: { ...SETTINGS_ROW, paused_until } }).client);
+    expect(await badgeText()).toBe('');
+
+    vi.setSystemTime(new Date(2026, 10, 7, 14, 0)); // Saturday
+    await refreshBadge(fakeClient({ due }).client);
+    expect(await badgeText()).toBe('');
+    await refreshBadge(fakeClient({ due, settings: { ...SETTINGS_ROW, weekends: true } }).client);
+    expect(await badgeText()).toBe('3');
   });
 });
 

@@ -124,6 +124,7 @@ Deno.test('disputes are refused for missing, already disputed, and choice attemp
     [{ ...ATTEMPT, sense: null }, 404],
     [{ ...ATTEMPT, disputed_at: REVIEWED_AT }, 409],
     [{ ...ATTEMPT, task_type: 'choice' }, 400],
+    [{ ...ATTEMPT, task_type: 'pick' }, 400],
   ];
   for (const [attempt, status] of cases) {
     const { deps, opinions } = fakeDeps({ attempt });

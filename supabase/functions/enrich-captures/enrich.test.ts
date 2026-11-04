@@ -4,12 +4,21 @@ import {
   type CaptureToEnrich,
   type Enrichment,
   enrichCapture,
+  type SenseEnrichment,
   type EnrichDeps,
   generateEnrichment,
   PermanentEnrichmentError,
   sentenceHash,
   toFrame,
+  toFrameChoice,
 } from './enrich.ts';
+
+/** A frame as the model sends it, with two wrong endings for the multiple-choice version. */
+const f = (sentence: string) => ({
+  sentence,
+  wrong_endings: ['everyone still talks about them', 'it lasted for decades'],
+  why: 'Ephemeral means it did not last.',
+});
 
 // What the model sends: frames mark the meaning in [brackets], which generateEnrichment blanks.
 const ENRICHMENT: Enrichment = {
@@ -19,7 +28,10 @@ const ENRICHMENT: Enrichment = {
   register: 'formal',
   paraphrase: "Something that doesn't last long.",
   examples: ['The fireworks were ephemeral.', 'Her interest in chess was ephemeral.'],
-  frames: ['Their fame was ephemeral because [nobody remembered them a year later].', 'The joy of a new phone is ephemeral; [after a week it feels ordinary].'],
+  frames: [
+    f('Their fame was ephemeral because [nobody remembered them a year later].'),
+    f('The joy of a new phone is ephemeral; [after a week it feels ordinary].'),
+  ],
   scenarios: [
     { register: 'neutral', situation: 'Tell a friend why a viral trend faded so fast.' },
     { register: 'formal', situation: 'Write to your manager about a short-lived sales spike.' },
@@ -38,7 +50,13 @@ const ENRICHMENT: Enrichment = {
 };
 
 const FRAMES = ['Their fame was ephemeral because ___.', 'The joy of a new phone is ephemeral; ___.'];
-const EXPECTED: Enrichment = { ...ENRICHMENT, frames: FRAMES };
+const CHOICE = (answer: string) => ({
+  answer,
+  wrong: ['everyone still talks about them', 'it lasted for decades'] as [string, string],
+  why: 'Ephemeral means it did not last.',
+});
+const FRAME_CHOICES = [CHOICE('nobody remembered them a year later'), CHOICE('after a week it feels ordinary')];
+const EXPECTED: SenseEnrichment = { ...ENRICHMENT, frames: FRAMES, frame_choices: FRAME_CHOICES };
 
 // deno-lint-ignore no-explicit-any
 function fakeClient(response: Record<string, unknown>, calls: any[] = []) {
@@ -86,7 +104,7 @@ Deno.test('generateEnrichment keeps two frames, three scenarios, and at most fiv
   const { client } = fakeClient({
     parsed_output: {
       ...ENRICHMENT,
-      frames: ['No brackets, ephemeral.', 'Two ephemeral [a] parts [b].', ...ENRICHMENT.frames, 'Extra ephemeral [c].'],
+      frames: [f('No brackets, ephemeral.'), f('Two ephemeral [a] parts [b].'), ...ENRICHMENT.frames, f('Extra ephemeral [c].')],
       scenarios: [...ENRICHMENT.scenarios, { register: 'technical', situation: 'Extra.' }],
       hints: { ...ENRICHMENT.hints, partners: ['a', 'b', 'c', 'd', 'e', 'f'] },
     },
@@ -101,7 +119,7 @@ Deno.test('generateEnrichment keeps two frames, three scenarios, and at most fiv
 
 Deno.test('generateEnrichment drops frames that bracket the word instead of its meaning', async () => {
   const guessTheWord = 'Fame on the internet is often [ephemeral].';
-  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [guessTheWord, ...ENRICHMENT.frames] } });
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [f(guessTheWord), ...ENRICHMENT.frames] } });
 
   const result = await generateEnrichment(client, 'm', 'ephemeral', null);
 
@@ -109,7 +127,7 @@ Deno.test('generateEnrichment drops frames that bracket the word instead of its 
 });
 
 Deno.test('generateEnrichment keeps a word with only one usable frame', async () => {
-  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [ENRICHMENT.frames[0], 'Fame is [ephemeral].'] } });
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [ENRICHMENT.frames[0]!, f('Fame is [ephemeral].')] } });
 
   const result = await generateEnrichment(client, 'm', 'ephemeral', null);
 
@@ -117,11 +135,12 @@ Deno.test('generateEnrichment keeps a word with only one usable frame', async ()
 });
 
 Deno.test('generateEnrichment falls back to the starter when every frame brackets the word', async () => {
-  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: ['Fame is [ephemeral].'] } });
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [f('Fame is [ephemeral].')] } });
 
   const result = await generateEnrichment(client, 'm', 'ephemeral', null);
 
   assertEquals(result.frames, ['Most internet fame is ephemeral, so ___']);
+  assertEquals(result.frame_choices, [null]);
 });
 
 Deno.test('the prompt says to describe the saved word even when the sentence is about another word', async () => {
@@ -166,6 +185,24 @@ Deno.test('toFrame blanks the bracketed meaning and keeps the word', () => {
   assertEquals(toFrame('Egregious [a] and [b].', ['egregious']), null);
 });
 
+Deno.test('toFrameChoice keeps two distinct wrong endings, or gives up on the choice', () => {
+  assertEquals(toFrameChoice('I left', [' [I stayed] ', 'I cheered.'], ' Why. '), { answer: 'I left', wrong: ['I stayed', 'I cheered.'], why: 'Why.' });
+  assertEquals(toFrameChoice('I left', ['I stayed'], 'Why.'), null);
+  assertEquals(toFrameChoice('I left', ['I left.', 'I cheered'], 'Why.'), null);
+  assertEquals(toFrameChoice('I left', ['I stayed', 'i stayed'], 'Why.'), null);
+  assertEquals(toFrameChoice('I left', ['I stayed', 'I cheered'], ' '), null);
+});
+
+Deno.test('generateEnrichment keeps a frame for typing when its choice is unusable', async () => {
+  const frames = [{ ...ENRICHMENT.frames[0]!, wrong_endings: ['only one'] }, ENRICHMENT.frames[1]!];
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames } });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, FRAMES);
+  assertEquals(result.frame_choices, [null, FRAME_CHOICES[1]]);
+});
+
 Deno.test('generateEnrichment treats a refusal as permanent', async () => {
   const { client } = fakeClient({ stop_reason: 'refusal', parsed_output: null });
   await assertRejects(() => generateEnrichment(client, 'm', 'x', null), PermanentEnrichmentError);
@@ -179,7 +216,7 @@ Deno.test('generateEnrichment rejects truncated, unparsed, or short output as re
     {
       parsed_output: {
         ...ENRICHMENT,
-        frames: ['Ephemeral, no brackets.', 'Missing the word [here].'],
+        frames: [f('Ephemeral, no brackets.'), f('Missing the word [here].')],
         hints: { ...ENRICHMENT.hints, starter: 'No word here, so' },
       },
     },

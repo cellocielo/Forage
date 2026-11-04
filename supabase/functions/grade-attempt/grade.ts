@@ -5,19 +5,19 @@ import { z } from 'zod';
 import { type CardRow, type HintsUsed, reviewCard, type ReviewLogRow, type Score, scoreToRating } from '../_shared/scheduling.ts';
 
 // Bump when the prompt or schema changes, and rerun the regression set first (PRD G2, G5).
-export const PROMPT_VERSION = 'grade-v1';
+export const PROMPT_VERSION = 'grade-v2';
 // Cheap model by default; disputes get a second opinion from a frontier model (G3, G6).
 export const DEFAULT_MODEL = 'claude-haiku-5-5';
 export const DISPUTE_MODEL = 'claude-opus-5-5';
 
-export const TASK_TYPES = ['choice', 'frame', 'scenario', 'open'] as const;
+export const TASK_TYPES = ['choice', 'pick', 'frame', 'scenario', 'open'] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
 export const MAX_ANSWER = 500;
 
 /**
  * What the popup sends. The prompt itself is looked up server-side from the card's sense.
- * For a choice task, `answer` is the sentence the learner picked.
+ * For a choice task, `answer` is the sentence the learner picked; for a pick task, the ending.
  */
 export const GradeRequestSchema = z.object({
   card_id: z.string().uuid(),
@@ -51,10 +51,10 @@ export const VerdictSchema = z.object({
 });
 export type Verdict = z.infer<typeof VerdictSchema>;
 
-const SYSTEM_PROMPT = `You grade one sentence that a learner wrote to practise an English word they are learning.
+const SYSTEM_PROMPT = `You grade one sentence that a learner wrote to practice an English word they are learning.
 
 You get the word, the meaning it should carry, the task the learner was given, and their sentence.
-- frame: the learner filled in a blank in a sentence that already uses the word. Judge only whether their part shows they understand the meaning. Don't penalise the frame's own wording.
+- frame: the learner filled in a blank in a sentence that already uses the word. Judge only whether their part shows they understand the meaning. Don't penalize the frame's own wording.
 - scenario: the learner wrote for a stated listener and goal. Also judge whether the tone suits that listener and register.
 - open: judge the whole sentence.
 
@@ -74,6 +74,13 @@ export interface UsageChoice {
   mistake: string;
 }
 
+/** A frame's multiple-choice version (the pick task): its ending and two wrong ones. */
+export interface FrameChoice {
+  answer: string;
+  wrong: [string, string];
+  why: string;
+}
+
 export interface PracticeSense {
   id: string;
   lemma: string;
@@ -82,6 +89,7 @@ export interface PracticeSense {
   frames: string[] | null;
   scenarios: Array<{ register: string; situation: string }> | null;
   usage_choice?: UsageChoice | null;
+  frame_choices?: Array<FrameChoice | null> | null;
 }
 
 export interface Task {
@@ -100,8 +108,9 @@ export function taskFor(sense: PracticeSense, type: TaskType, index: number): Ta
   if (type === 'choice') {
     return sense.usage_choice && index === 0 ? { type, prompt: choicePrompt(sense.lemma) } : null;
   }
-  if (type === 'frame') {
+  if (type === 'frame' || type === 'pick') {
     const frame = sense.frames?.[index];
+    if (type === 'pick' && !sense.frame_choices?.[index]) return null;
     return frame ? { type, prompt: frame } : null;
   }
   if (type === 'scenario') {
@@ -218,6 +227,29 @@ export function choiceVerdict(choice: UsageChoice, picked: string): Verdict | nu
   };
 }
 
+/**
+ * Grades a pick task without a model call, like a choice: the right ending counts as Good,
+ * a wrong one as Again, and the explanation says why the right one fits.
+ */
+export function pickVerdict(frame: string, choice: FrameChoice, picked: string): Verdict | null {
+  const isCorrect = picked === choice.answer;
+  if (!isCorrect && !choice.wrong.includes(picked)) return null;
+  return {
+    sense: isCorrect ? 'correct' : 'wrong',
+    grammar: 'correct',
+    collocation: 'natural',
+    tone: 'not_applicable',
+    corrected_sentence: fillFrame(frame, choice.answer),
+    rationale: choice.why,
+    score: isCorrect ? 3 : 1,
+  };
+}
+
+/** Tasks checked against stored answers, with no model call and no hints. */
+export function isAutoChecked(type: TaskType): boolean {
+  return type === 'choice' || type === 'pick';
+}
+
 /** A card as read by the signed-in user, with what's needed to grade it. */
 export interface CardToGrade extends CardRow {
   id: string;
@@ -272,18 +304,20 @@ export async function gradeAttempt(request: GradeRequest, deps: GradeDeps): Prom
   if (!task) return { ok: false, status: 400, error: 'Unknown prompt for this word' };
 
   const answer = request.answer.trim();
-  const sentence = task.type === 'frame' ? fillFrame(task.prompt, answer) : answer;
+  const sentence = task.type === 'frame' || task.type === 'pick' ? fillFrame(task.prompt, answer) : answer;
   let verdict: Verdict;
-  if (task.type === 'choice') {
-    const picked = choiceVerdict(card.sense.usage_choice!, answer);
+  if (isAutoChecked(task.type)) {
+    const picked = task.type === 'choice'
+      ? choiceVerdict(card.sense.usage_choice!, answer)
+      : pickVerdict(task.prompt, card.sense.frame_choices![request.prompt_index]!, answer);
     if (!picked) return { ok: false, status: 400, error: 'Unknown choice for this word' };
     verdict = picked;
   } else {
     verdict = await deps.verdict(card.sense, task, answer, sentence);
   }
   const score = verdict.score as Score;
-  // A choice task has no hint ladder.
-  const hintsUsed = (task.type === 'choice' ? 0 : request.hints_used) as HintsUsed;
+  // Choice and pick tasks have no hint ladder.
+  const hintsUsed = (isAutoChecked(task.type) ? 0 : request.hints_used) as HintsUsed;
   const rating = scoreToRating(score, hintsUsed);
   const { card: newCard, log } = reviewCard(card, rating, now);
 
@@ -300,7 +334,7 @@ export async function gradeAttempt(request: GradeRequest, deps: GradeDeps): Prom
     rating,
     review: log,
   });
-  if (!attemptId) return { ok: false, status: 409, error: 'This word was just practised' };
+  if (!attemptId) return { ok: false, status: 409, error: 'This word was just practiced' };
 
   return {
     ok: true,

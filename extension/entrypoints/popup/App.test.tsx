@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { DEFAULT_SETTINGS } from '@/lib/settings';
 import App from './App';
 
 const auth = vi.hoisted(() => ({
@@ -11,7 +12,13 @@ const auth = vi.hoisted(() => ({
   signOut: vi.fn(),
 }));
 vi.mock('@/lib/supabase', () => ({ supabase: { auth } }));
-vi.mock('./Practice', () => ({ Practice: () => <p>practice card</p> }));
+vi.mock('./Practice', () => ({ Practice: ({ dailyCap }: { dailyCap: number }) => <p>practice card, cap {dailyCap}</p> }));
+const settings = vi.hoisted(() => ({ loadSettings: vi.fn(), saveSettings: vi.fn() }));
+vi.mock('@/lib/settings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/settings')>()),
+  ...settings,
+}));
+vi.mock('@/lib/badge', () => ({ refreshBadge: vi.fn() }));
 
 let emitAuthChange: (session: unknown) => void;
 
@@ -24,6 +31,8 @@ beforeEach(() => {
   auth.signInWithPassword.mockResolvedValue({ error: null });
   auth.signUp.mockResolvedValue({ error: null });
   auth.signOut.mockResolvedValue({ error: null });
+  settings.loadSettings.mockResolvedValue({ ...DEFAULT_SETTINGS, dailyCap: 7 });
+  settings.saveSettings.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -71,8 +80,30 @@ describe('popup', () => {
     emitAuthChange({ user: { email: 'me@example.com' } });
 
     expect(await screen.findByText('me@example.com')).toBeTruthy();
-    expect(screen.getByText('practice card')).toBeTruthy();
+    expect(await screen.findByText('practice card, cap 7')).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(auth.signOut).toHaveBeenCalled();
+  });
+
+  it('asks the spare-minute question once, before practice', async () => {
+    settings.loadSettings.mockResolvedValue(null);
+    auth.getSession.mockResolvedValue({ data: { session: { user: { email: 'me@example.com' } } } });
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Lunch' }));
+
+    expect(settings.saveSettings).toHaveBeenCalledWith(expect.anything(), { ...DEFAULT_SETTINGS, spareMinute: 'lunch' });
+    expect(await screen.findByText('practice card, cap 5')).toBeTruthy();
+  });
+
+  it('opens settings from the footer and returns to practice', async () => {
+    auth.getSession.mockResolvedValue({ data: { session: { user: { email: 'me@example.com' } } } });
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Done' }));
+
+    expect(await screen.findByText('practice card, cap 7')).toBeTruthy();
   });
 });

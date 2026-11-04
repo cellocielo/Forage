@@ -5,6 +5,7 @@ import {
   buildUserMessage,
   type CardToGrade,
   choiceVerdict,
+  pickVerdict,
   fillFrame,
   generateSecondOpinion,
   type GradeDeps,
@@ -35,6 +36,10 @@ const SENSE: PracticeSense = {
     incorrect: 'She gave an egregious speech that everyone loved.',
     mistake: '"Egregious" means shockingly bad, so it cannot praise a speech.',
   },
+  frame_choices: [
+    { answer: 'the crowd booed', wrong: ['everyone cheered', 'the fans thanked him'], why: 'Egregious means shockingly bad.' },
+    null,
+  ],
 };
 
 const NEW_CARD: CardRow = {
@@ -288,4 +293,32 @@ Deno.test('generateSecondOpinion uses the beta API with default fallbacks and a 
   assertEquals(calls[0].betas, ['server-side-fallback-2026-07-01']);
   assertEquals(calls[0].output_config.effort, 'medium');
   assertStringIncludes(calls[0].system, 'second opinion');
+});
+
+Deno.test('taskFor offers a pick only for frames that have a choice', () => {
+  assertEquals(taskFor(SENSE, 'pick', 0), { type: 'pick', prompt: SENSE.frames![0]! });
+  assertEquals(taskFor(SENSE, 'pick', 1), null);
+  assertEquals(taskFor({ ...SENSE, frame_choices: null }, 'pick', 0), null);
+});
+
+Deno.test('pickVerdict fills the frame with the right ending and explains it', () => {
+  const choice = SENSE.frame_choices![0]!;
+  const right = pickVerdict(SENSE.frames![0]!, choice, 'the crowd booed')!;
+  assertEquals([right.score, right.rationale], [3, choice.why]);
+  assertEquals(right.corrected_sentence, "The judge's ruling was so egregious that the crowd booed.");
+  assertEquals(pickVerdict(SENSE.frames![0]!, choice, 'everyone cheered')!.score, 1);
+  assertEquals(pickVerdict(SENSE.frames![0]!, choice, 'made up'), null);
+});
+
+Deno.test('gradeAttempt grades a pick without the model, recording the filled sentence', async () => {
+  const { deps, verdicts, recorded } = fakeDeps();
+
+  const outcome = await gradeAttempt({ ...REQUEST, task_type: 'pick', answer: 'everyone cheered', hints_used: 2 }, deps);
+
+  assert(outcome.ok);
+  assertEquals(outcome.rating, Rating.Again);
+  assertEquals(verdicts.length, 0);
+  assertEquals(recorded[0]![2].hints_used, 0);
+  assertEquals(recorded[0]![2].sentence, "The judge's ruling was so egregious that everyone cheered.");
+  assertEquals(outcome.verdict.corrected_sentence, "The judge's ruling was so egregious that the crowd booed.");
 });

@@ -1,7 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
+import { loadSettings, type Settings as SettingsValue } from '@/lib/settings';
 import { supabase } from '@/lib/supabase';
 import { Practice } from './Practice';
+import { Onboarding, Settings } from './Settings';
 
 function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -16,14 +18,73 @@ function App() {
   return <main>{session ? <SignedIn email={session.user.email} /> : <SignInForm />}</main>;
 }
 
+type SignedInView =
+  | { kind: 'loading' }
+  | { kind: 'error' }
+  | { kind: 'onboarding' }
+  | { kind: 'practice' | 'settings'; settings: SettingsValue };
+
 function SignedIn({ email }: { email?: string }) {
+  const [view, setView] = useState<SignedInView>({ kind: 'loading' });
+
+  const load = useCallback(async () => {
+    setView({ kind: 'loading' });
+    try {
+      const settings = await loadSettings(supabase);
+      setView(settings ? { kind: 'practice', settings } : { kind: 'onboarding' });
+    } catch {
+      setView({ kind: 'error' });
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  let body;
+  switch (view.kind) {
+    case 'loading':
+      body = <section className="practice" aria-busy="true" aria-label="Loading" />;
+      break;
+    case 'error':
+      body = (
+        <section className="practice">
+          <p role="alert">Couldn't load your settings. Check your connection and try again.</p>
+          <button type="button" onClick={load}>
+            Try again
+          </button>
+        </section>
+      );
+      break;
+    case 'onboarding':
+      body = <Onboarding onDone={(settings) => setView({ kind: 'practice', settings })} />;
+      break;
+    case 'practice':
+      body = <Practice dailyCap={view.settings.dailyCap} />;
+      break;
+    case 'settings':
+      body = (
+        <Settings
+          initial={view.settings}
+          onSaved={(settings) => setView({ kind: 'settings', settings })}
+          onClose={() => setView({ kind: 'practice', settings: view.settings })}
+        />
+      );
+      break;
+  }
+
   return (
     <>
-      <Practice />
+      {body}
       <footer className="account">
         <span>
           Signed in as <strong>{email}</strong>
         </span>
+        {view.kind === 'practice' && (
+          <button type="button" className="link" onClick={() => setView({ kind: 'settings', settings: view.settings })}>
+            Settings
+          </button>
+        )}
         <button type="button" className="link" onClick={() => supabase.auth.signOut()}>
           Sign out
         </button>

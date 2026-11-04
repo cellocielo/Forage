@@ -1,8 +1,11 @@
 import { FunctionsHttpError, type SupabaseClient } from '@supabase/supabase-js';
-import { countReadyWords } from './badge';
+import { countReadyWords, DAILY_CAP } from './badge';
 
-/** Easiest first: pick the right usage, fill a frame, write for a scenario, write freely. */
-export const TASK_LEVELS = ['choice', 'frame', 'scenario', 'open'] as const;
+/**
+ * Easiest first: pick the right usage, pick the ending for a frame, type the ending, write for
+ * a scenario, write freely.
+ */
+export const TASK_LEVELS = ['choice', 'pick', 'frame', 'scenario', 'open'] as const;
 export type TaskType = (typeof TASK_LEVELS)[number];
 
 export interface Scenario {
@@ -16,6 +19,13 @@ export interface UsageChoice {
   mistake: string;
 }
 
+/** A frame's multiple-choice version: the right ending and two wrong ones. */
+export interface FrameChoice {
+  answer: string;
+  wrong: [string, string];
+  why: string;
+}
+
 export interface PracticeCard {
   id: string;
   state: number;
@@ -26,6 +36,8 @@ export interface PracticeCard {
   frames: string[];
   scenarios: Scenario[];
   usageChoice: UsageChoice | null;
+  /** One per frame, in the same order; null where a frame has no choice. */
+  frameChoices: Array<FrameChoice | null>;
   hints: { partners: string[]; example: string | null; starter: string | null };
 }
 
@@ -34,8 +46,8 @@ export interface Task {
   index: number;
   prompt: string;
   register?: string;
-  /** Choice tasks: the two sentences, in the order shown. */
-  options?: [string, string];
+  /** Choice tasks: the two sentences; pick tasks: the three endings. In the order shown. */
+  options?: string[];
 }
 
 // Mirrors scaffoldLevel in supabase/functions/_shared/scheduling.ts; keep the thresholds in step.
@@ -47,6 +59,8 @@ function hasLevel(card: PracticeCard, type: TaskType): boolean {
   switch (type) {
     case 'choice':
       return card.usageChoice !== null;
+    case 'pick':
+      return pickIndexes(card).length > 0;
     case 'frame':
       return card.frames.length > 0;
     case 'scenario':
@@ -56,25 +70,38 @@ function hasLevel(card: PracticeCard, type: TaskType): boolean {
   }
 }
 
-/** Stable per card and review, so the correct sentence isn't always first. */
-function choiceFlipped(card: PracticeCard): boolean {
+/** Frames that have a multiple-choice version. */
+function pickIndexes(card: PracticeCard): number[] {
+  return card.frames.flatMap((_, i) => (card.frameChoices[i] ? [i] : []));
+}
+
+/** Stable per card and review, so the right answer isn't always in the same place. */
+function cardHash(card: PracticeCard): number {
   let hash = card.reps;
   for (const ch of card.id) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
-  return (hash & 1) === 1;
+  return Math.abs(hash);
+}
+
+function rotate<T>(items: T[], by: number): T[] {
+  const n = by % items.length;
+  return [...items.slice(n), ...items.slice(0, n)];
 }
 
 function buildTask(card: PracticeCard, type: TaskType): Task {
-  // New and weak words alternate between a frame and a usage choice (P8), so frames
-  // advance every other review when both exist.
-  const frameTurn = card.usageChoice ? Math.floor(card.reps / 2) : card.reps;
   switch (type) {
     case 'choice': {
       const { correct, incorrect } = card.usageChoice!;
-      const options: [string, string] = choiceFlipped(card) ? [incorrect, correct] : [correct, incorrect];
+      const options = rotate([correct, incorrect], cardHash(card));
       return { type, index: 0, prompt: `Which sentence uses "${card.word}" correctly?`, options };
     }
+    case 'pick': {
+      const indexes = pickIndexes(card);
+      const index = indexes[card.reps % indexes.length]!;
+      const { answer, wrong } = card.frameChoices[index]!;
+      return { type, index, prompt: card.frames[index]!, options: rotate([answer, ...wrong], cardHash(card)) };
+    }
     case 'frame': {
-      const index = frameTurn % card.frames.length;
+      const index = card.reps % card.frames.length;
       return { type, index, prompt: card.frames[index]! };
     }
     case 'scenario': {
@@ -87,25 +114,32 @@ function buildTask(card: PracticeCard, type: TaskType): Task {
   }
 }
 
-function baseLevel(card: PracticeCard): number {
-  if (card.state === STATE_NEW || card.stability < FRAME_BELOW_DAYS) {
-    return card.usageChoice && card.reps % 2 === 1 ? 0 : 1;
-  }
-  return card.stability < SCENARIO_BELOW_DAYS ? 2 : 3;
-}
+// New and weak words rotate through these, starting with picking a frame's ending (P8).
+const WEAK_ROTATION: TaskType[] = ['pick', 'choice', 'frame'];
 
 /**
- * The task for this review (P8, P12): frames (alternating with a usage choice) for new and
- * weak words, scenarios in the middle, an open prompt for strong ones. Moves up a level when
- * a sense lacks that scaffold, and rotates through frames and scenarios as the card is reviewed.
+ * The task for this review (P8, P12): new and weak words rotate through picking a frame's
+ * ending, choosing the right usage, and typing a frame's ending; mid-stability words get
+ * scenarios, strong ones an open prompt. Moves up a level when a sense lacks that scaffold,
+ * and rotates through frames and scenarios as the card is reviewed.
  */
 export function chooseTask(card: PracticeCard): Task {
-  let level = baseLevel(card);
+  const weak = card.state === STATE_NEW || card.stability < FRAME_BELOW_DAYS;
+  if (weak) {
+    const rotation = WEAK_ROTATION.filter((type) => hasLevel(card, type));
+    if (rotation.length > 0) return buildTask(card, rotation[card.reps % rotation.length]!);
+  }
+  let level = TASK_LEVELS.indexOf(weak || card.stability < SCENARIO_BELOW_DAYS ? 'scenario' : 'open');
   while (!hasLevel(card, TASK_LEVELS[level]!)) level++;
   return buildTask(card, TASK_LEVELS[level]!);
 }
 
 /** "Easier, please" (P12): the next easier task this word has, or null if this is the easiest. */
+/** Multiple-choice tasks: checked against stored answers, with no hints and no disputes. */
+export function isAutoChecked(type: TaskType): boolean {
+  return type === 'choice' || type === 'pick';
+}
+
 export function easierTask(card: PracticeCard, task: Task): Task | null {
   for (let level = TASK_LEVELS.indexOf(task.type) - 1; level >= 0; level--) {
     const type = TASK_LEVELS[level]!;
@@ -119,7 +153,7 @@ const CARD_SELECT = `
   captures!inner (
     word,
     lemmas ( lemma ),
-    senses!inner ( part_of_speech, frames, scenarios, usage_choice, hint_partners, hint_example, hint_starter )
+    senses!inner ( part_of_speech, frames, frame_choices, scenarios, usage_choice, hint_partners, hint_example, hint_starter )
   )
 `;
 
@@ -136,6 +170,7 @@ interface CardQueryRow {
       frames: string[] | null;
       scenarios: Scenario[] | null;
       usage_choice: UsageChoice | null;
+      frame_choices: Array<FrameChoice | null> | null;
       hint_partners: string[] | null;
       hint_example: string | null;
       hint_starter: string | null;
@@ -156,6 +191,7 @@ function toPracticeCard(row: CardQueryRow): PracticeCard {
     frames: sense.frames ?? [],
     scenarios: sense.scenarios ?? [],
     usageChoice: sense.usage_choice ?? null,
+    frameChoices: sense.frame_choices ?? [],
     hints: {
       partners: sense.hint_partners ?? [],
       example: sense.hint_example,
@@ -168,8 +204,12 @@ function toPracticeCard(row: CardQueryRow): PracticeCard {
  * The most overdue ready card, or null when nothing is due or today's cap is used up.
  * Uses the same rules as the toolbar badge, so the two always agree.
  */
-export async function fetchNextCard(client: SupabaseClient, now: Date = new Date()): Promise<PracticeCard | null> {
-  if ((await countReadyWords(client, now)) === 0) return null;
+export async function fetchNextCard(
+  client: SupabaseClient,
+  now: Date = new Date(),
+  dailyCap: number = DAILY_CAP,
+): Promise<PracticeCard | null> {
+  if ((await countReadyWords(client, now, dailyCap)) === 0) return null;
 
   const nowIso = now.toISOString();
   const { data, error } = await client
@@ -236,7 +276,7 @@ export function submitAttempt(
       task_type: task.type,
       prompt_index: task.index,
       answer: answer.trim(),
-      hints_used: task.type === 'choice' ? 0 : hintsUsed,
+      hints_used: isAutoChecked(task.type) ? 0 : hintsUsed,
       easier,
     },
     "Couldn't grade right now. Check your connection and try again.",
@@ -263,7 +303,9 @@ export function disputeAttempt(client: SupabaseClient, attemptId: string): Promi
   );
 }
 
-export const RATING_LABELS: Record<number, string> = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
+// Shown to the learner as how well they know the word. The FSRS ratings behind them are
+// Again, Hard, Good and Easy (1 to 4).
+export const RATING_LABELS: Record<number, string> = { 1: 'Not yet', 2: 'Shaky', 3: 'Solid', 4: 'Mastered' };
 
 /** "tomorrow", "in 3 days", "in 2 weeks" for the next review. */
 export function describeNextReview(scheduledDays: number): string {
@@ -274,7 +316,7 @@ export function describeNextReview(scheduledDays: number): string {
 }
 
 // The grader caps by how many hints were opened (scoreToRating): the 2nd caps at Good, the 3rd at Hard.
-const CAP_AFTER_STEP = [null, 'Good', 'Hard'] as const;
+const CAP_AFTER_STEP = [null, RATING_LABELS[3]!, RATING_LABELS[2]!] as const;
 
 /** The hint ladder (P11): partners, then an example, then a starter. Missing steps are skipped. */
 export function hintSteps(card: PracticeCard): Array<{ label: string; text: string; cap: string | null }> {

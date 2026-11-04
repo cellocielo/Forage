@@ -25,6 +25,7 @@ const CARD: PracticeCard = {
     { register: 'informal', situation: 'Text your roommate.' },
   ],
   usageChoice: null,
+  frameChoices: [],
   hints: { partners: ['an egregious error', 'egregious behavior'], example: 'It was egregious.', starter: 'The call was' },
 };
 
@@ -33,6 +34,8 @@ const CHOICE = {
   incorrect: 'She gave an egregious speech that everyone loved.',
   mistake: '"Egregious" means shockingly bad.',
 };
+
+const PICK = { answer: 'I complained', wrong: ['I cheered', 'I said thanks'] as [string, string], why: 'Bad things get complaints.' };
 
 describe('chooseTask', () => {
   it('gives new and weak words a frame, rotating with each review', () => {
@@ -62,20 +65,30 @@ describe('chooseTask', () => {
     expect(chooseTask({ ...CARD, frames: [], scenarios: [] })).toMatchObject({ type: 'open' });
   });
 
-  it('alternates frames with a usage choice for new and weak words, advancing frames every other review', () => {
-    const card = { ...CARD, usageChoice: CHOICE };
-    const types = [0, 1, 2, 3].map((reps) => chooseTask({ ...card, state: reps ? 2 : 0, stability: 2, reps }));
-    expect(types.map((t) => [t.type, t.index])).toEqual([
+  it('starts new words on picking an ending, then rotates through a usage choice and typing', () => {
+    const card = { ...CARD, usageChoice: CHOICE, frameChoices: [PICK, null] };
+    const tasks = [0, 1, 2, 3].map((reps) => chooseTask({ ...card, state: reps ? 2 : 0, stability: 2, reps }));
+    expect(tasks.map((t) => [t.type, t.index])).toEqual([
+      ['pick', 0],
+      ['choice', 0],
       ['frame', 0],
-      ['choice', 0],
+      ['pick', 0],
+    ]);
+    expect([...tasks[0]!.options!].sort()).toEqual(['I cheered', 'I complained', 'I said thanks']);
+    expect(tasks[0]!.prompt).toBe(CARD.frames[0]);
+  });
+
+  it('skips tasks the word lacks in the rotation', () => {
+    const tasks = [0, 1].map((reps) => chooseTask({ ...CARD, frameChoices: [null, PICK], reps, state: 2, stability: 2 }));
+    expect(tasks.map((t) => [t.type, t.index])).toEqual([
+      ['pick', 1],
       ['frame', 1],
-      ['choice', 0],
     ]);
   });
 
   it('offers both sentences in a choice, in an order that varies by card', () => {
     const orders = ['a', 'b', 'c', 'd', 'e', 'f'].map(
-      (id) => chooseTask({ ...CARD, id, usageChoice: CHOICE, reps: 1, state: 2, stability: 2 }).options!,
+      (id) => chooseTask({ ...CARD, id, usageChoice: CHOICE, reps: 0, state: 2, stability: 2 }).options!,
     );
     for (const options of orders) expect([...options].sort()).toEqual([CHOICE.correct, CHOICE.incorrect].sort());
     expect(new Set(orders.map((o) => o[0])).size).toBe(2);
@@ -84,12 +97,13 @@ describe('chooseTask', () => {
 
 describe('easierTask', () => {
   it('drops one level at a time to the easiest the word has', () => {
-    const card = { ...CARD, usageChoice: CHOICE, state: 2, stability: 30 };
+    const card = { ...CARD, usageChoice: CHOICE, frameChoices: [PICK], state: 2, stability: 30 };
     const open = chooseTask(card);
     const scenario = easierTask(card, open)!;
     const frame = easierTask(card, scenario)!;
-    const choice = easierTask(card, frame)!;
-    expect([open.type, scenario.type, frame.type, choice.type]).toEqual(['open', 'scenario', 'frame', 'choice']);
+    const pick = easierTask(card, frame)!;
+    const choice = easierTask(card, pick)!;
+    expect([open, scenario, frame, pick, choice].map((t) => t.type)).toEqual(['open', 'scenario', 'frame', 'pick', 'choice']);
     expect(easierTask(card, choice)).toBeNull();
   });
 
@@ -104,8 +118,8 @@ describe('hintSteps', () => {
   it('orders partners, example, starter, capping from the second step', () => {
     expect(hintSteps(CARD)).toEqual([
       { label: 'Goes with', text: 'an egregious error · egregious behavior', cap: null },
-      { label: 'Example', text: 'It was egregious.', cap: 'Good' },
-      { label: 'Start with', text: 'The call was…', cap: 'Hard' },
+      { label: 'Example', text: 'It was egregious.', cap: 'Solid' },
+      { label: 'Start with', text: 'The call was…', cap: 'Shaky' },
     ]);
   });
 
@@ -113,7 +127,7 @@ describe('hintSteps', () => {
     const steps = hintSteps({ ...CARD, hints: { partners: [], example: 'Ex.', starter: 'Start' } });
     expect(steps.map((s) => [s.label, s.cap])).toEqual([
       ['Example', null],
-      ['Start with', 'Good'],
+      ['Start with', 'Solid'],
     ]);
   });
 });
@@ -168,6 +182,7 @@ describe('fetchNextCard', () => {
         frames: CARD.frames,
         scenarios: CARD.scenarios,
         usage_choice: null,
+        frame_choices: null,
         hint_partners: CARD.hints.partners,
         hint_example: CARD.hints.example,
         hint_starter: CARD.hints.starter,
@@ -210,10 +225,20 @@ describe('submitAttempt', () => {
     });
   });
 
+  it('sends the picked ending for a pick, with no hints', async () => {
+    const invoke = vi.fn().mockResolvedValue({ data: { attempt_id: 'a1' }, error: null });
+    const client = { functions: { invoke } } as unknown as SupabaseClient;
+    const card = { ...CARD, frameChoices: [PICK] };
+
+    await submitAttempt(client, card, chooseTask(card), 'I complained', 1);
+
+    expect(invoke.mock.calls[0]![1].body).toMatchObject({ task_type: 'pick', prompt_index: 0, answer: 'I complained', hints_used: 0 });
+  });
+
   it('sends the picked sentence for a choice, with no hints', async () => {
     const invoke = vi.fn().mockResolvedValue({ data: { attempt_id: 'a1' }, error: null });
     const client = { functions: { invoke } } as unknown as SupabaseClient;
-    const card = { ...CARD, usageChoice: CHOICE, reps: 1 };
+    const card = { ...CARD, usageChoice: CHOICE, reps: 0 };
 
     await submitAttempt(client, card, chooseTask(card), CHOICE.correct, 2);
 
@@ -221,10 +246,10 @@ describe('submitAttempt', () => {
   });
 
   it("shows the function's error message", async () => {
-    const error = new FunctionsHttpError(Response.json({ error: 'This word was just practised' }, { status: 409 }));
+    const error = new FunctionsHttpError(Response.json({ error: 'This word was just practiced' }, { status: 409 }));
     const client = { functions: { invoke: vi.fn().mockResolvedValue({ data: null, error }) } } as unknown as SupabaseClient;
 
-    expect(await submitAttempt(client, CARD, task, 'x', 0)).toEqual({ ok: false, message: 'This word was just practised' });
+    expect(await submitAttempt(client, CARD, task, 'x', 0)).toEqual({ ok: false, message: 'This word was just practiced' });
   });
 
   it('falls back to a generic message when offline', async () => {

@@ -1,7 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { DEFAULT_SETTINGS, loadSettings, practiceOffReason } from './settings';
 
-// S3 default. Becomes a user setting with the rest of the timing controls (T5, D6).
-export const DAILY_CAP = 5;
+// S3 default; users can change it in settings (T5).
+export const DAILY_CAP = DEFAULT_SETTINGS.dailyCap;
 
 const BADGE_COLOR = '#2f3b2f';
 
@@ -10,7 +11,7 @@ function startOfLocalDay(now: Date): Date {
 }
 
 /**
- * Words ready to practise now: due, not snoozed, not archived, and within what's left of
+ * Words ready to practice now: due, not snoozed, not archived, and within what's left of
  * today's cap. RLS limits the counts to the signed-in user's cards.
  */
 export async function countReadyWords(
@@ -75,7 +76,13 @@ async function updateOnce(client: SupabaseClient): Promise<void> {
       await setBadge(0);
       return;
     }
-    await setBadge(await countReadyWords(client));
+    const settings = (await loadSettings(client)) ?? DEFAULT_SETTINGS;
+    // The badge is a surface users can turn off (D6), and it stays blank while paused or on weekends off (T6, T8).
+    if (!settings.badgeEnabled || practiceOffReason(settings)) {
+      await setBadge(0);
+      return;
+    }
+    await setBadge(await countReadyWords(client, new Date(), settings.dailyCap));
   } catch (error) {
     // Offline or server trouble: keep the last count rather than flash an empty badge.
     console.warn('Forage: could not refresh the badge', error);

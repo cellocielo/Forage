@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { type CardRow, type HintsUsed, reviewCard, type Score, scoreToRating } from '../_shared/scheduling.ts';
-import type { PracticeSense, Task, TaskType, Verdict } from '../grade-attempt/grade.ts';
+import { isAutoChecked, type PracticeSense, type Task, type TaskType, type Verdict } from '../grade-attempt/grade.ts';
 
 export const DisputeRequestSchema = z.object({ attempt_id: z.string().uuid() });
 export type DisputeRequest = z.infer<typeof DisputeRequestSchema>;
@@ -70,8 +70,8 @@ export async function disputeAttempt(request: DisputeRequest, deps: DisputeDeps)
   const attempt = await deps.loadAttempt(request.attempt_id);
   if (!attempt || !attempt.sense) return { ok: false, status: 404, error: 'Attempt not found' };
   if (attempt.disputed_at) return { ok: false, status: 409, error: 'You already disputed this grade' };
-  if (attempt.task_type === 'choice') {
-    return { ok: false, status: 400, error: 'Choice answers are checked automatically' };
+  if (isAutoChecked(attempt.task_type)) {
+    return { ok: false, status: 400, error: 'Multiple-choice answers are checked automatically' };
   }
 
   const task = taskForAttempt(attempt, attempt.sense);

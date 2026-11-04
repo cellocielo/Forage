@@ -7,6 +7,7 @@ import {
   easierTask,
   fetchNextCard,
   hintSteps,
+  isAutoChecked,
   RATING_LABELS,
   submitAttempt,
   type DisputeResult,
@@ -24,18 +25,18 @@ type View =
   | { kind: 'result'; card: PracticeCard; task: Task; result: GradeResult };
 
 /** One practice card (P1): the next ready word, a scaffolded task, hints, and the grade. */
-export function Practice() {
+export function Practice({ dailyCap }: { dailyCap?: number } = {}) {
   const [view, setView] = useState<View>({ kind: 'loading' });
 
   const loadNext = useCallback(async () => {
     setView({ kind: 'loading' });
     try {
-      const card = await fetchNextCard(supabase);
+      const card = await fetchNextCard(supabase, new Date(), dailyCap);
       setView(card ? { kind: 'task', card, task: chooseTask(card) } : { kind: 'empty' });
     } catch {
       setView({ kind: 'error', message: "Couldn't load your words. Check your connection and try again." });
     }
-  }, []);
+  }, [dailyCap]);
 
   useEffect(() => {
     loadNext();
@@ -49,7 +50,7 @@ export function Practice() {
         <section className="practice">
           <h1>All caught up</h1>
           <p className="hint">
-            Nothing to practise right now. Select a word on any page, then right-click → Save to Forage, or press
+            Nothing to practice right now. Select a word on any page, then right-click → Save to Forage, or press
             Alt+Shift+S.
           </p>
         </section>
@@ -143,11 +144,12 @@ function TaskCard({
     </button>
   );
 
-  if (task.type === 'choice') {
+  if (isAutoChecked(task.type)) {
     return (
       <section className="practice">
         <WordHeading card={card} />
         <p className="prompt">{task.prompt}</p>
+        {task.type === 'pick' && <p className="hint">Pick the ending that fits "{card.word}".</p>}
         <div className="choices">
           {task.options!.map((option) => (
             <button key={option} type="button" className="choice" disabled={pending} onClick={() => send(option)}>
@@ -157,6 +159,7 @@ function TaskCard({
         </div>
         {pending && <p className="hint">Checking…</p>}
         {error && <p role="alert">{error}</p>}
+        {easierButton}
       </section>
     );
   }
@@ -241,7 +244,7 @@ function ResultCard({
   const [dispute, setDispute] = useState<
     { kind: 'idle' } | { kind: 'pending' } | { kind: 'error'; message: string } | { kind: 'done'; result: DisputeResult }
   >({ kind: 'idle' });
-  const isChoice = task.type === 'choice';
+  const isChoice = isAutoChecked(task.type);
   const label = RATING_LABELS[result.rating] ?? '';
   const corrected = result.verdict.corrected_sentence.trim();
   const changed = corrected !== '' && corrected !== result.sentence.trim();
@@ -260,6 +263,10 @@ function ResultCard({
   return (
     <section className="practice" aria-live="polite">
       <WordHeading card={card} />
+      <p className="prompt task-recap">
+        {task.register && <span className="register">{task.register}</span>}
+        {task.prompt}
+      </p>
       <p className={`rating rating-${result.rating}`}>{label}</p>
       <p>{result.verdict.rationale}</p>
       <figure className="sentence">

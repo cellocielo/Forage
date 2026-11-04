@@ -20,7 +20,7 @@ const CARD_SELECT = `
   id, due, stability, difficulty, scheduled_days, learning_steps, reps, lapses, state, last_review, archived_at,
   captures!inner (
     lemmas ( lemma ),
-    senses ( id, part_of_speech, definition, frames, scenarios, usage_choice )
+    senses ( id, part_of_speech, definition, frames, scenarios, usage_choice, frame_choices )
   )
 `;
 
