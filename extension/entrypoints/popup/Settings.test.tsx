@@ -54,7 +54,7 @@ describe('Settings', () => {
     await user.clear(screen.getByLabelText('Words per day'));
     await user.type(screen.getByLabelText('Words per day'), '10');
     await user.click(screen.getByLabelText('Practice on weekends'));
-    await user.click(screen.getByLabelText('Corner reminders'));
+    await user.click(screen.getByLabelText('Reminder notifications'));
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
     const expected = {

@@ -1,7 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { withSupabase } from '@supabase/server';
 import type { CardRow } from '../_shared/scheduling.ts';
-import { DISPUTE_MODEL, GradingRefusedError, generateSecondOpinion, type PracticeSense } from '../grade-attempt/grade.ts';
+import {
+  DISPUTE_MODEL,
+  generateChoiceReview,
+  generateSecondOpinion,
+  GradingRefusedError,
+  type PracticeSense,
+} from '../grade-attempt/grade.ts';
 import { type AttemptToDispute, type DisputeDeps, disputeAttempt, DisputeRequestSchema } from './dispute.ts';
 
 const model = Deno.env.get('DISPUTE_MODEL') ?? DISPUTE_MODEL;
@@ -37,7 +43,7 @@ Deno.serve(
         if (data.sense_id) {
           const { data: row, error: senseError } = await ctx.supabaseAdmin
             .from('senses')
-            .select('id, part_of_speech, definition, frames, scenarios, usage_choice, lemmas ( lemma )')
+            .select('id, part_of_speech, definition, frames, scenarios, usage_choice, frame_choices, lemmas ( lemma )')
             .eq('id', data.sense_id)
             .maybeSingle();
           if (senseError) throw new Error(senseError.message);
@@ -74,6 +80,22 @@ Deno.serve(
       },
       secondOpinion: (sense, task, answer, sentence) =>
         generateSecondOpinion(anthropic, model, sense, task, answer, sentence),
+      reviewChoice: (sense, prompt, options, keyed, picked) =>
+        generateChoiceReview(anthropic, model, sense, prompt, options, keyed, picked),
+      async retireQuestion(senseId, type, index) {
+        // Senses are shared through the enrichment cache, so this fixes the question for everyone.
+        if (type === 'choice') {
+          const { error } = await ctx.supabaseAdmin.from('senses').update({ usage_choice: null }).eq('id', senseId);
+          if (error) throw new Error(error.message);
+          return;
+        }
+        const { data, error } = await ctx.supabaseAdmin.from('senses').select('frame_choices').eq('id', senseId).single();
+        if (error) throw new Error(error.message);
+        const choices = [...((data.frame_choices as unknown[] | null) ?? [])];
+        choices[index] = null;
+        const { error: updateError } = await ctx.supabaseAdmin.from('senses').update({ frame_choices: choices }).eq('id', senseId);
+        if (updateError) throw new Error(updateError.message);
+      },
       async resolve(attempt, verdict, rating, newCard, expectedReps) {
         const { data, error } = await ctx.supabaseAdmin.rpc('resolve_dispute', {
           p_user_id: userId,

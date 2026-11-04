@@ -1,6 +1,7 @@
 import { isAuthStorageKey, refreshBadge } from '@/lib/badge';
 import { flushQueue } from '@/lib/capture-queue';
 import { createSaveWordListener } from '@/lib/messaging';
+import { maybeRemind, NOTIFICATION_ID, type ReminderContent, respondToReminder } from '@/lib/reminders';
 import { supabase } from '@/lib/supabase';
 
 const MENU_ID = 'forage-save-word';
@@ -9,6 +10,8 @@ const SYNC_ALARM = 'forage-sync-captures';
 const BADGE_AFTER_SAVE_ALARM = 'forage-badge-after-save';
 // Enrichment runs every minute, and the card appears once it finishes.
 const BADGE_AFTER_SAVE_MINUTES = 2;
+// T1: coming back after a minute without input counts as a natural break.
+const IDLE_SECONDS = 60;
 
 export default defineBackground(() => {
   browser.runtime.onInstalled.addListener(() => {
@@ -57,9 +60,66 @@ export default defineBackground(() => {
     if (area === 'local' && Object.keys(changes).some(isAuthStorageKey)) refreshBadge(supabase);
   });
 
+  // Reminders (P3) wait for a natural break (T1): returning after a pause, or closing a tab.
+  browser.idle.setDetectionInterval(IDLE_SECONDS);
+  browser.idle.onStateChanged.addListener((state) => {
+    if (state === 'active') remind();
+  });
+  browser.tabs.onRemoved.addListener(() => remind());
+
+  browser.notifications.onClicked.addListener((id) => {
+    if (id !== NOTIFICATION_ID) return;
+    browser.notifications.clear(id);
+    respondToReminder('opened');
+    openPractice();
+  });
+  browser.notifications.onButtonClicked.addListener((id, buttonIndex) => {
+    if (id !== NOTIFICATION_ID) return;
+    browser.notifications.clear(id);
+    respondToReminder(buttonIndex === 0 ? 'later-today' : 'not-today');
+  });
+
   flushQueue(supabase);
   refreshBadge(supabase);
 });
+
+let reminding: Promise<unknown> | null = null;
+
+/** One check at a time, so a burst of closed tabs can't show two reminders. */
+function remind() {
+  reminding ??= maybeRemind(supabase, { isGoodMoment, show: showReminder })
+    .catch((error) => console.warn('Forage: reminder check failed', error))
+    .finally(() => {
+      reminding = null;
+    });
+}
+
+// T2: never over fullscreen video, presentations, or a locked screen.
+async function isGoodMoment(): Promise<boolean> {
+  const [window, idle] = await Promise.all([browser.windows.getLastFocused(), browser.idle.queryState(IDLE_SECONDS)]);
+  return window.state !== 'fullscreen' && idle !== 'locked';
+}
+
+async function showReminder({ title, message }: ReminderContent) {
+  await browser.notifications.create(NOTIFICATION_ID, {
+    type: 'basic',
+    iconUrl: browser.runtime.getURL('/icon/128.png'),
+    title,
+    message,
+    contextMessage: 'Click to answer',
+    buttons: [{ title: 'Later today' }, { title: 'Not today' }],
+    priority: 0,
+  });
+}
+
+/** Opens the practice card: the toolbar popup if Chrome allows it here, else a small window. */
+async function openPractice() {
+  try {
+    await browser.action.openPopup();
+  } catch {
+    await browser.windows.create({ url: browser.runtime.getURL('/popup.html'), type: 'popup', width: 380, height: 640 });
+  }
+}
 
 async function captureInTab(tabId: number) {
   try {

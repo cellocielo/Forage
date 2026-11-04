@@ -1,6 +1,15 @@
 import { z } from 'zod';
+import type { Grade } from 'ts-fsrs';
 import { type CardRow, type HintsUsed, reviewCard, type Score, scoreToRating } from '../_shared/scheduling.ts';
-import { isAutoChecked, type PracticeSense, type Task, type TaskType, type Verdict } from '../grade-attempt/grade.ts';
+import {
+  type ChoiceReview,
+  fillFrame,
+  isAutoChecked,
+  type PracticeSense,
+  type Task,
+  type TaskType,
+  type Verdict,
+} from '../grade-attempt/grade.ts';
 
 export const DisputeRequestSchema = z.object({ attempt_id: z.string().uuid() });
 export type DisputeRequest = z.infer<typeof DisputeRequestSchema>;
@@ -27,6 +36,10 @@ export interface DisputeDeps {
   /** The card's current review count, or null if it is gone or archived. */
   loadCardReps(cardId: string): Promise<number | null>;
   secondOpinion(sense: PracticeSense, task: Task, answer: string, sentence: string): Promise<Verdict>;
+  /** Multiple choice: is the learner's pick also a correct use of the word? */
+  reviewChoice(sense: PracticeSense, prompt: string, options: string[], keyed: string, picked: string): Promise<ChoiceReview>;
+  /** Stops using a faulty question for everyone: the usage choice, or one frame's choices. */
+  retireQuestion(senseId: string, type: 'choice' | 'pick', index: number): Promise<void>;
   /** Logs the dispute and applies `newCard` if given; null if already disputed. */
   resolve(
     attempt: AttemptToDispute,
@@ -70,14 +83,59 @@ export async function disputeAttempt(request: DisputeRequest, deps: DisputeDeps)
   const attempt = await deps.loadAttempt(request.attempt_id);
   if (!attempt || !attempt.sense) return { ok: false, status: 404, error: 'Attempt not found' };
   if (attempt.disputed_at) return { ok: false, status: 409, error: 'You already disputed this grade' };
-  if (isAutoChecked(attempt.task_type)) {
-    return { ok: false, status: 400, error: 'Multiple-choice answers are checked automatically' };
-  }
+  if (isAutoChecked(attempt.task_type)) return disputeChoice(attempt, attempt.sense, deps);
 
   const task = taskForAttempt(attempt, attempt.sense);
   const verdict = await deps.secondOpinion(attempt.sense, task, attempt.answer, attempt.sentence);
+  const rating = scoreToRating(verdict.score as Score, attempt.hints_used as HintsUsed);
+  return settle(attempt, verdict, rating, deps);
+}
+
+/** The question as the learner saw it, rebuilt from the sense, with every option as a full sentence. */
+export function choiceQuestion(
+  attempt: AttemptToDispute,
+  sense: PracticeSense,
+): { index: number; options: string[]; keyed: string } | null {
+  if (attempt.task_type === 'choice') {
+    const choice = sense.usage_choice;
+    return choice ? { index: 0, options: [choice.correct, choice.incorrect], keyed: choice.correct } : null;
+  }
+  const index = sense.frames?.indexOf(attempt.prompt) ?? -1;
+  const choice = index >= 0 ? sense.frame_choices?.[index] : null;
+  if (!choice) return null;
+  const fill = (ending: string) => fillFrame(attempt.prompt, ending);
+  return { index, options: [choice.answer, ...choice.wrong].map(fill), keyed: fill(choice.answer) };
+}
+
+/**
+ * A disputed multiple-choice answer: the answer key may be wrong. If a stronger model finds the
+ * pick also correct, the learner gets it right, the review is redone, and the question is retired.
+ */
+async function disputeChoice(attempt: AttemptToDispute, sense: PracticeSense, deps: DisputeDeps): Promise<DisputeOutcome> {
+  if (attempt.rating >= 3) return { ok: false, status: 400, error: 'Your answer was already marked right' };
+  const question = choiceQuestion(attempt, sense);
+  if (!question) return { ok: false, status: 409, error: 'This question has already been removed' };
+
+  const review = await deps.reviewChoice(sense, attempt.prompt, question.options, question.keyed, attempt.sentence);
+  const verdict: Verdict = {
+    sense: review.picked_is_correct ? 'correct' : 'wrong',
+    grammar: 'correct',
+    collocation: 'natural',
+    tone: 'not_applicable',
+    corrected_sentence: review.picked_is_correct ? attempt.sentence : question.keyed,
+    rationale: review.reason,
+    score: review.picked_is_correct ? 3 : 1,
+  };
+  const outcome = await settle(attempt, verdict, review.picked_is_correct ? 3 : 1, deps);
+  if (outcome.ok && review.picked_is_correct) {
+    await deps.retireQuestion(sense.id, attempt.task_type as 'choice' | 'pick', question.index);
+  }
+  return outcome;
+}
+
+/** Logs the second opinion and, if the rating changed, redoes the review when that's still possible. */
+async function settle(attempt: AttemptToDispute, verdict: Verdict, rating: number, deps: DisputeDeps): Promise<DisputeOutcome> {
   const score = verdict.score as Score;
-  const rating = scoreToRating(score, attempt.hints_used as HintsUsed);
   const changed = rating !== attempt.rating;
 
   let newCard: CardRow | null = null;
@@ -85,7 +143,7 @@ export async function disputeAttempt(request: DisputeRequest, deps: DisputeDeps)
   if (changed && attempt.card_before) {
     const reps = await deps.loadCardReps(attempt.card_id);
     if (reps === attempt.card_before.reps + 1) {
-      newCard = reviewCard(attempt.card_before, rating, new Date(attempt.reviewed_at)).card;
+      newCard = reviewCard(attempt.card_before, rating as Grade, new Date(attempt.reviewed_at)).card;
       expectedReps = reps;
     }
   }

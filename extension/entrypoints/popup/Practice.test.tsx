@@ -171,9 +171,17 @@ describe('Practice: choice, easier, disputes', () => {
 
     expect(mocks.submitAttempt.mock.calls[0]![2]).toMatchObject({ type: 'choice' });
     expect(mocks.submitAttempt.mock.calls[0]![3]).toBe(CHOICE.incorrect);
-    expect(await screen.findByText('Not yet')).toBeTruthy();
+    expect(await screen.findByText('Wrong')).toBeTruthy();
     expect(screen.getByText('Correct usage')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'I disagree' })).toBeNull();
+
+    // A wrong pick can be disputed, in case the question itself is faulty.
+    mocks.disputeAttempt.mockResolvedValue({
+      ok: true,
+      result: { verdict: RESULT.verdict, score: 3, rating: 3, changed: true, rescheduled: true, due: RESULT.due, scheduled_days: 3 },
+    });
+    await user.click(screen.getByRole('button', { name: 'I disagree' }));
+    expect(await screen.findByText('Second opinion: Right')).toBeTruthy();
+    expect(screen.getByText(/this question won't be used again/)).toBeTruthy();
   });
 
   it('starts a new word on picking the ending that fits, and can drop to a usage choice', async () => {

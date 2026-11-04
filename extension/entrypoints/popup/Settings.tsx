@@ -203,7 +203,7 @@ export function Settings({
             checked={draft.cornerReminderEnabled}
             onChange={(e) => set('cornerReminderEnabled', e.target.checked)}
           />
-          Corner reminders
+          Reminder notifications
         </label>
       </fieldset>
 

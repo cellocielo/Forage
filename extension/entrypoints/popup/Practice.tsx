@@ -245,7 +245,8 @@ function ResultCard({
     { kind: 'idle' } | { kind: 'pending' } | { kind: 'error'; message: string } | { kind: 'done'; result: DisputeResult }
   >({ kind: 'idle' });
   const isChoice = isAutoChecked(task.type);
-  const label = RATING_LABELS[result.rating] ?? '';
+  // Multiple choice is simply right or wrong; written answers get a level of mastery.
+  const label = isChoice ? (result.rating >= 3 ? 'Right' : 'Wrong') : (RATING_LABELS[result.rating] ?? '');
   const corrected = result.verdict.corrected_sentence.trim();
   const changed = corrected !== '' && corrected !== result.sentence.trim();
 
@@ -267,28 +268,32 @@ function ResultCard({
         {task.register && <span className="register">{task.register}</span>}
         {task.prompt}
       </p>
-      <p className={`rating rating-${result.rating}`}>{label}</p>
+      <p className={`rating rating-${result.rating}`}>
+        {isChoice && <span aria-hidden="true">{result.rating >= 3 ? '✓' : '✕'}</span>}
+        <span>{label}</span>
+      </p>
       <p>{result.verdict.rationale}</p>
       <figure className="sentence">
         <figcaption>{isChoice ? 'You picked' : 'You wrote'}</figcaption>
         <blockquote>{result.sentence}</blockquote>
       </figure>
       {changed && (
-        <figure className="sentence">
+        <figure className="sentence suggested">
           <figcaption>{isChoice ? 'Correct usage' : 'Suggested'}</figcaption>
           <blockquote>{corrected}</blockquote>
         </figure>
       )}
       <p className="hint">Next review {describeNextReview(result.scheduled_days)}.</p>
 
-      {dispute.kind === 'done' && <SecondOpinion dispute={dispute.result} />}
+      {dispute.kind === 'done' && <SecondOpinion dispute={dispute.result} isChoice={isChoice} />}
       {dispute.kind === 'error' && <p role="alert">{dispute.message}</p>}
 
       <div className="actions">
         <button type="button" autoFocus onClick={onNext}>
           Next word
         </button>
-        {!isChoice && (dispute.kind === 'idle' || dispute.kind === 'error') && (
+        {/* A right multiple-choice answer has nothing to dispute; a wrong one may mean a faulty question. */}
+        {(!isChoice || result.rating < 3) && (dispute.kind === 'idle' || dispute.kind === 'error') && (
           <button type="button" className="secondary" onClick={disagree}>
             I disagree
           </button>
@@ -299,9 +304,13 @@ function ResultCard({
   );
 }
 
-function SecondOpinion({ dispute }: { dispute: DisputeResult }) {
+function SecondOpinion({ dispute, isChoice }: { dispute: DisputeResult; isChoice: boolean }) {
   let outcome: string;
-  if (!dispute.changed) outcome = 'It agrees with the first grade.';
+  if (isChoice && !dispute.changed) outcome = 'Your pick is still wrong.';
+  else if (isChoice && dispute.rescheduled && dispute.scheduled_days !== null) {
+    outcome = `Your pick counts as right, and this question won't be used again. Next review ${describeNextReview(dispute.scheduled_days)}.`;
+  } else if (isChoice) outcome = "Your pick counts as right, and this question won't be used again.";
+  else if (!dispute.changed) outcome = 'It agrees with the first grade.';
   else if (dispute.rescheduled && dispute.scheduled_days !== null) {
     outcome = `Your next review is now ${describeNextReview(dispute.scheduled_days)}.`;
   } else outcome = "You've reviewed this word since, so its schedule stays as it is.";
@@ -309,7 +318,8 @@ function SecondOpinion({ dispute }: { dispute: DisputeResult }) {
   return (
     <div className="second-opinion">
       <p>
-        <strong>Second opinion: {RATING_LABELS[dispute.rating]}</strong>. {outcome}
+        <strong>Second opinion: {isChoice ? (dispute.rating >= 3 ? 'Right' : 'Wrong') : RATING_LABELS[dispute.rating]}</strong>.{' '}
+        {outcome}
       </p>
       <p>{dispute.verdict.rationale}</p>
     </div>

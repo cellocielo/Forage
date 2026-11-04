@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
+import { Acorn } from '@/components/Acorn';
 import { loadSettings, type Settings as SettingsValue } from '@/lib/settings';
 import { supabase } from '@/lib/supabase';
 import { Practice } from './Practice';
@@ -75,6 +76,10 @@ function SignedIn({ email }: { email?: string }) {
 
   return (
     <>
+      <div className="brand">
+        <Acorn size={18} />
+        Forage
+      </div>
       {body}
       <footer className="account">
         <span>
@@ -118,7 +123,10 @@ function SignInForm() {
         authenticate('sign-in');
       }}
     >
-      <h1>Forage</h1>
+      <div className="brand brand-large">
+        <Acorn size={44} />
+        <h1>Forage</h1>
+      </div>
       <label>
         Email
         <input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />

@@ -6,7 +6,7 @@ export default defineConfig({
   manifest: {
     name: 'Forage',
     description: 'Save words in context while you read.',
-    permissions: ['storage', 'contextMenus', 'activeTab', 'scripting', 'alarms'],
+    permissions: ['storage', 'contextMenus', 'activeTab', 'scripting', 'alarms', 'notifications', 'idle'],
     commands: {
       'save-word': {
         suggested_key: { default: 'Alt+Shift+S' },
