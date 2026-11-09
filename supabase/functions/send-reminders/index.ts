@@ -9,9 +9,11 @@ import { type PushOutcome, type SendDeps, sendDueReminders, sendTest, type Subsc
 Deno.serve(
   withSupabase({ auth: ['secret:*', 'user'] }, async (req, ctx) => {
     if (req.method !== 'POST') return Response.json({ error: 'Use POST' }, { status: 405 });
-    const publicKey = Deno.env.get('VAPID_PUBLIC_KEY');
-    const privateKey = Deno.env.get('VAPID_PRIVATE_KEY');
-    const subject = Deno.env.get('VAPID_SUBJECT');
+    // Pasted secrets easily pick up spaces or the quotes around a JSON value; drop them.
+    const secret = (name: string) => Deno.env.get(name)?.trim().replace(/^["']|["',]$/g, '').trim();
+    const publicKey = secret('VAPID_PUBLIC_KEY');
+    const privateKey = secret('VAPID_PRIVATE_KEY');
+    const subject = secret('VAPID_SUBJECT');
     if (!publicKey || !privateKey || !subject) {
       return Response.json({ error: 'Notifications are not configured' }, { status: 500 });
     }
@@ -28,9 +30,11 @@ Deno.serve(
         );
         return 'sent';
       } catch (error) {
-        const status = (error as { statusCode?: number }).statusCode;
+        const { statusCode: status, body } = error as { statusCode?: number; body?: string };
         if (status === 404 || status === 410) return 'gone';
-        console.warn(`push failed (${status ?? 'no status'}) to ${new URL(sub.endpoint).host}`);
+        // The push service's reason, such as Apple's {"reason":"BadJwtToken"}; it names no user.
+        const reason = typeof body === 'string' ? body.slice(0, 200) : (error as Error).message;
+        console.warn(`push failed (${status ?? 'no status'}) to ${new URL(sub.endpoint).host}: ${reason}`);
         return 'failed';
       }
     }
