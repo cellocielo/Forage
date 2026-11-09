@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "@supabase/server": "npm:@supabase/server@1.9.2",
+    "web-push": "npm:web-push@3.6.7",
+    "@std/assert": "jsr:@std/assert@1"
+  }
+}

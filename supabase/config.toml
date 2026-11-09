@@ -429,3 +429,7 @@ verify_jwt = false
 # Same as grade-attempt: signed-in users, JWT verified inside the function.
 [functions.dispute-attempt]
 verify_jwt = false
+
+# Called by pg_cron with a secret key, and by signed-in users for a test notification.
+[functions.send-reminders]
+verify_jwt = false

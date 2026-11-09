@@ -7,6 +7,8 @@ import { Onboarding, Settings } from '@/entrypoints/popup/Settings';
 import { loadSettings, type Settings as SettingsValue } from '@/lib/settings';
 import { supabase } from '@/lib/supabase';
 import { refreshBadge } from './badge';
+import { Notifications } from './Notifications';
+import { respondToReminder, turnOffPush } from './push';
 import { Save, useClearShareParams } from './Save';
 import { readShare, type Shared } from './share';
 
@@ -17,6 +19,8 @@ export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   // Read once: text shared to the app opens the Save tab with it.
   const [shared] = useState<Shared | null>(() => readShare(location.search));
+  // Opened by tapping a reminder notification.
+  const [fromReminder] = useState(() => new URLSearchParams(location.search).get('from') === 'reminder');
   useClearShareParams();
 
   useEffect(() => {
@@ -29,7 +33,7 @@ export function App() {
   return (
     <main>
       {session ? (
-        <SignedIn email={session.user.email} shared={shared} />
+        <SignedIn email={session.user.email} shared={shared} fromReminder={fromReminder} />
       ) : (
         <>
           {shared && <p className="hint signed-out-share">Sign in, then share the word again to save it.</p>}
@@ -42,7 +46,7 @@ export function App() {
 
 type View = { kind: 'loading' } | { kind: 'error' } | { kind: 'onboarding' } | { kind: 'ready'; settings: SettingsValue };
 
-function SignedIn({ email, shared }: { email?: string; shared: Shared | null }) {
+function SignedIn({ email, shared, fromReminder }: { email?: string; shared: Shared | null; fromReminder: boolean }) {
   const [view, setView] = useState<View>({ kind: 'loading' });
   const [tab, setTab] = useState<Tab>(shared ? 'save' : 'practice');
 
@@ -60,6 +64,16 @@ function SignedIn({ email, shared }: { email?: string; shared: Shared | null }) 
     load();
     refreshBadge(supabase);
   }, [load]);
+
+  useEffect(() => {
+    if (fromReminder) respondToReminder(supabase).catch(() => {});
+  }, [fromReminder]);
+
+  async function signOut() {
+    // This device stops getting the account's reminders.
+    await turnOffPush(supabase).catch(() => {});
+    await supabase.auth.signOut();
+  }
 
   let body;
   if (view.kind === 'loading') body = <section className="practice" aria-busy="true" aria-label="Loading" />;
@@ -79,6 +93,7 @@ function SignedIn({ email, shared }: { email?: string; shared: Shared | null }) 
   else {
     body = (
       <>
+        <Notifications />
         <Settings
           initial={view.settings}
           onSaved={(settings) => setView({ kind: 'ready', settings })}
@@ -88,7 +103,7 @@ function SignedIn({ email, shared }: { email?: string; shared: Shared | null }) 
           <span>
             Signed in as <strong>{email}</strong>
           </span>
-          <button type="button" className="link" onClick={() => supabase.auth.signOut()}>
+          <button type="button" className="link" onClick={signOut}>
             Sign out
           </button>
         </footer>
