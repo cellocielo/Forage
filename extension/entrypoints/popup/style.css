@@ -473,3 +473,23 @@ select {
   background-position: right 11px center;
   cursor: pointer;
 }
+
+/* After answering: other meanings and example sentences */
+
+.learn-more {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.learn-more .actions > button {
+  flex: 1;
+}
+
+.hints dd + dd {
+  margin-top: 4px;
+}
+
+.hints dd em {
+  color: var(--muted);
+}

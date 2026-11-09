@@ -7,18 +7,45 @@ function fakeClient({
   upsertError = null as unknown,
   status = 201,
   sessionError = null as unknown,
+  earlier = null as string | null,
 } = {}) {
   const upsert = vi.fn().mockResolvedValue({ error: upsertError, status });
-  const from = vi.fn(() => ({ upsert }));
+  const maybeSingle = vi.fn().mockResolvedValue({ data: earlier ? { client_capture_id: earlier } : null, error: null });
+  const filters: unknown[][] = [];
+  const query: Record<string, unknown> = { maybeSingle };
+  for (const name of ['select', 'eq', 'neq', 'gte', 'lte', 'is', 'limit']) {
+    query[name] = (...args: unknown[]) => {
+      filters.push([name, ...args]);
+      return query;
+    };
+  }
+  const from = vi.fn(() => ({ upsert, ...query }));
   const getSession = vi.fn().mockResolvedValue({
     data: { session: userId ? { user: { id: userId } } : null },
     error: sessionError,
   });
   const client = { from, auth: { getSession } } as unknown as SupabaseClient;
-  return { client, from, upsert };
+  return { client, from, upsert, filters };
 }
 
 describe('saveWord', () => {
+  it('skips a double save of the same word and sentence', async () => {
+    const { client, upsert, filters } = fakeClient({ earlier: 'cap-0' });
+    const capturedAt = new Date('2026-10-27T12:00:00Z');
+
+    const result = await saveWord(client, { word: 'ephemeral', sentence: 'Fame is ephemeral.', capturedAt });
+
+    expect(result).toEqual({ ok: true, word: 'ephemeral', clientCaptureId: 'cap-0', duplicate: true });
+    expect(upsert).not.toHaveBeenCalled();
+    expect(filters).toEqual(
+      expect.arrayContaining([
+        ['eq', 'word', 'ephemeral'],
+        ['eq', 'sentence', 'Fame is ephemeral.'],
+        ['gte', 'captured_at', '2026-10-27T11:50:00.000Z'],
+      ]),
+    );
+  });
+
   it('upserts into captures keyed on user_id,client_capture_id', async () => {
     const { client, from, upsert } = fakeClient();
     const capturedAt = new Date('2026-10-27T12:00:00Z');

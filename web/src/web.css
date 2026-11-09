@@ -1,0 +1,94 @@
+/* The popup's styles (style.css) sized for a phone screen, plus the tab bar and word picker. */
+
+body {
+  width: auto;
+  min-height: 100dvh;
+}
+
+main {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: calc(14px + env(safe-area-inset-top)) 16px calc(84px + env(safe-area-inset-bottom));
+}
+
+/* 16px stops iOS from zooming into fields. */
+input,
+select,
+textarea {
+  font-size: 16px;
+}
+
+button {
+  min-height: 44px;
+}
+
+button.link {
+  min-height: 0;
+}
+
+.tabs {
+  position: fixed;
+  inset: auto 0 0;
+  display: flex;
+  justify-content: center;
+  padding: 6px max(8px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.tabs button {
+  flex: 1;
+  max-width: 172px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.tabs button:hover:not(:disabled) {
+  border: 0;
+  background: var(--sunken);
+}
+
+.tabs button[aria-current='page'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.word-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  min-height: 36px;
+  padding: 4px 10px;
+  border-color: var(--line-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.chip:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--sunken);
+}
+
+.chip.chosen,
+.chip.chosen:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.signed-out-share {
+  margin-bottom: 12px;
+}

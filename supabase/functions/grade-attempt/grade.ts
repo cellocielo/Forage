@@ -26,6 +26,9 @@ export const GradeRequestSchema = z.object({
   answer: z.string().trim().min(1).max(MAX_ANSWER),
   hints_used: z.number().int().min(0).max(3),
   easier: z.boolean().default(false),
+  // "Keep practicing": the learner asked for more after finishing what was due, so the word
+  // may not be due yet. FSRS gives an early review less credit on its own.
+  extra: z.boolean().default(false),
 });
 export type GradeRequest = z.infer<typeof GradeRequestSchema>;
 
@@ -350,7 +353,7 @@ export async function gradeAttempt(request: GradeRequest, deps: GradeDeps): Prom
   if (card.archived_at) return { ok: false, status: 409, error: 'This word is archived' };
 
   const now = deps.now();
-  if (new Date(card.due) > now) return { ok: false, status: 409, error: 'This word is not due yet' };
+  if (!request.extra && new Date(card.due) > now) return { ok: false, status: 409, error: 'This word is not due yet' };
 
   const task = taskFor(card.sense, request.task_type, request.prompt_index);
   if (!task) return { ok: false, status: 400, error: 'Unknown prompt for this word' };

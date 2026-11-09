@@ -6,6 +6,7 @@ import { Practice } from './Practice';
 
 const mocks = vi.hoisted(() => ({
   fetchNextCard: vi.fn(),
+  fetchExtraCard: vi.fn(),
   submitAttempt: vi.fn(),
   disputeAttempt: vi.fn(),
   refreshBadge: vi.fn(),
@@ -15,6 +16,7 @@ vi.mock('@/lib/badge', () => ({ refreshBadge: mocks.refreshBadge }));
 vi.mock('@/lib/practice', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/practice')>()),
   fetchNextCard: mocks.fetchNextCard,
+  fetchExtraCard: mocks.fetchExtraCard,
   submitAttempt: mocks.submitAttempt,
   disputeAttempt: mocks.disputeAttempt,
 }));
@@ -31,6 +33,9 @@ const CARD: PracticeCard = {
   usageChoice: null,
   frameChoices: [],
   hints: { partners: ['an egregious error'], example: 'The printer jam was egregious.', starter: 'The call was' },
+  definition: 'shockingly bad',
+  otherMeanings: [{ partOfSpeech: 'adjective', definition: 'remarkably good (old use)' }],
+  examples: ['The fee was egregious.', 'He made an egregious mistake.'],
 };
 
 const RESULT: GradeResult = {
@@ -52,7 +57,9 @@ const RESULT: GradeResult = {
 };
 
 beforeEach(() => {
+  vi.clearAllMocks();
   mocks.fetchNextCard.mockResolvedValue(CARD);
+  mocks.fetchExtraCard.mockResolvedValue(null);
   mocks.submitAttempt.mockResolvedValue({ ok: true, result: RESULT });
 });
 afterEach(cleanup);
@@ -73,6 +80,7 @@ describe('Practice', () => {
       expect.objectContaining({ type: 'frame', index: 0 }),
       'the crowd booed',
       0,
+      false,
       false,
     );
     expect(await screen.findByText('Solid')).toBeTruthy();
@@ -123,6 +131,26 @@ describe('Practice', () => {
     expect((screen.getByLabelText('Fill in the blank') as HTMLInputElement).value).toBe('the crowd booed');
   });
 
+  it('shows other meanings and example sentences on request after answering', async () => {
+    const user = userEvent.setup();
+    render(<Practice />);
+    await user.type(await screen.findByLabelText('Fill in the blank'), 'x{Enter}');
+
+    await user.click(await screen.findByRole('button', { name: 'Other meanings' }));
+    expect(screen.getByText('shockingly bad')).toBeTruthy();
+    expect(screen.getByText('remarkably good (old use)')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Hide meanings' }));
+    expect(screen.queryByText('shockingly bad')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Use it in a sentence' }));
+    expect(screen.getByText('The fee was egregious.')).toBeTruthy();
+    expect(screen.getByText('Example 1 of 2')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Another example' }));
+    expect(screen.getByText('He made an egregious mistake.')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Another example' }));
+    expect(screen.getByText('The fee was egregious.')).toBeTruthy();
+  });
+
   it('loads the next word after a result', async () => {
     const user = userEvent.setup();
     render(<Practice />);
@@ -133,6 +161,35 @@ describe('Practice', () => {
 
     expect(await screen.findByText('All caught up')).toBeTruthy();
     expect(mocks.fetchNextCard).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers to keep practicing words that are not due yet, each once', async () => {
+    const NEXT = { ...CARD, id: 'card-2', word: 'laconic' };
+    mocks.fetchNextCard.mockResolvedValue(null);
+    mocks.fetchExtraCard.mockImplementation(async (_client: unknown, _now: Date, seen: string[]) =>
+      !seen.includes('card-1') ? CARD : !seen.includes('card-2') ? NEXT : null,
+    );
+    const user = userEvent.setup();
+    render(<Practice />);
+
+    await user.click(await screen.findByRole('button', { name: 'Keep practicing' }));
+    await user.type(await screen.findByLabelText('Fill in the blank'), 'x{Enter}');
+    expect(mocks.submitAttempt.mock.calls[0]![6]).toBe(true);
+
+    await user.click(await screen.findByRole('button', { name: 'Next word' }));
+    expect((await screen.findByRole('heading')).textContent).toBe('laconic adjective');
+    await user.type(screen.getByLabelText('Fill in the blank'), 'y{Enter}');
+    await user.click(await screen.findByRole('button', { name: 'Next word' }));
+
+    expect(await screen.findByText("That's every word")).toBeTruthy();
+  });
+
+  it('does not offer to keep practicing when there are no other words', async () => {
+    mocks.fetchNextCard.mockResolvedValue(null);
+    render(<Practice />);
+
+    expect(await screen.findByText('All caught up')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Keep practicing' })).toBeNull();
   });
 
   it('says when nothing is ready, and offers a retry when loading fails', async () => {

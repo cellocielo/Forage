@@ -5,6 +5,7 @@ import {
   describeNextReview,
   disputeAttempt,
   easierTask,
+  fetchExtraCard,
   fetchNextCard,
   hintSteps,
   submitAttempt,
@@ -27,6 +28,9 @@ const CARD: PracticeCard = {
   usageChoice: null,
   frameChoices: [],
   hints: { partners: ['an egregious error', 'egregious behavior'], example: 'It was egregious.', starter: 'The call was' },
+  definition: 'shockingly bad',
+  otherMeanings: [{ partOfSpeech: 'adjective', definition: 'remarkable (old use)' }],
+  examples: ['The fee was egregious.', 'It was egregious.'],
 };
 
 const CHOICE = {
@@ -156,7 +160,7 @@ function fakeClient({ due = 1, reviewedToday = 0, row = null as unknown, error =
       },
       maybeSingle: () => Promise.resolve({ data: row, error }),
     };
-    for (const name of ['select', 'is', 'lte', 'gte', 'or', 'order', 'limit']) {
+    for (const name of ['select', 'is', 'lte', 'gte', 'or', 'not', 'order', 'limit']) {
       builder[name] = (...args: unknown[]) => {
         own.push([name, ...args]);
         calls.push([name, ...args]);
@@ -179,6 +183,10 @@ describe('fetchNextCard', () => {
       lemmas: { lemma: 'egregious' },
       senses: {
         part_of_speech: 'adjective',
+        definition: CARD.definition,
+        // The hint example repeats one here, so it's listed once.
+        examples: ['The fee was egregious.', 'It was egregious.'],
+        other_meanings: [{ part_of_speech: 'adjective', definition: 'remarkable (old use)' }, { definition: '' }],
         frames: CARD.frames,
         scenarios: CARD.scenarios,
         usage_choice: null,
@@ -209,6 +217,15 @@ describe('fetchNextCard', () => {
     const { client } = fakeClient({ error: { message: 'boom' } });
     await expect(fetchNextCard(client)).rejects.toThrow('boom');
   });
+
+  it('keeps practicing with the soonest-due word not yet seen, due or not', async () => {
+    const { client, calls } = fakeClient({ due: 0, row: ROW });
+
+    expect(await fetchExtraCard(client, new Date(), ['card-9', 'card-8'])).toEqual(CARD);
+    expect(calls).toContainEqual(['not', 'id', 'in', '(card-9,card-8)']);
+    expect(calls).toContainEqual(['order', 'due', { ascending: true }]);
+    expect(calls.some(([n, c]) => n === 'lte' && c === 'due')).toBe(false);
+  });
 });
 
 describe('submitAttempt', () => {
@@ -221,7 +238,7 @@ describe('submitAttempt', () => {
 
     expect(await submitAttempt(client, CARD, task, '  the crowd booed ', 2, true)).toEqual({ ok: true, result });
     expect(invoke).toHaveBeenCalledWith('grade-attempt', {
-      body: { card_id: 'card-1', task_type: 'frame', prompt_index: 0, answer: 'the crowd booed', hints_used: 2, easier: true },
+      body: { card_id: 'card-1', task_type: 'frame', prompt_index: 0, answer: 'the crowd booed', hints_used: 2, easier: true, extra: false },
     });
   });
 

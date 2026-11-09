@@ -8,7 +8,9 @@ import {
   generateEnrichment,
   MAX_ATTEMPTS,
   PROMPT_VERSION,
+  type SameWordCards,
 } from './enrich.ts';
+import { matchMeaning } from './match.ts';
 
 const BATCH_SIZE = 10;
 const model = Deno.env.get('ENRICH_MODEL') ?? DEFAULT_MODEL;
@@ -51,8 +53,20 @@ Deno.serve(
       async linkCached(captureId, hash, cached) {
         const { error } = await db
           .from('captures')
-          .update({ ...cached, sentence_hash: hash, enrichment_status: 'done', enrichment_error: null })
+          // place_capture marks it done, once it knows whether this is a new card.
+          .update({ ...cached, sentence_hash: hash, enrichment_error: null })
           .eq('id', captureId);
+        if (error) throw new Error(error.message);
+      },
+      async sameWordCards(captureId) {
+        const { data, error } = await db.rpc('same_word_cards', { p_capture_id: captureId });
+        if (error) throw new Error(error.message);
+        if (!data) throw new Error('Capture has no sense to compare');
+        return data as SameWordCards;
+      },
+      matchMeaning: (word, sentence, meaning, known) => matchMeaning(anthropic, model, word, sentence, meaning, known),
+      async place(captureId, cardId) {
+        const { error } = await db.rpc('place_capture', { p_capture_id: captureId, p_card_id: cardId });
         if (error) throw new Error(error.message);
       },
       async markFailed(captureId, message, giveUp) {
@@ -68,7 +82,22 @@ Deno.serve(
       },
     };
 
-    const outcomes = await Promise.all(captures.map((capture) => enrichCapture(capture, deps)));
+    // The same word twice in one batch (say, from an offline queue) runs in order, so the
+    // second one sees the first one's card and can join it instead of making another.
+    const byWord = new Map<string, CaptureToEnrich[]>();
+    for (const capture of captures) {
+      const key = capture.word.trim().toLowerCase();
+      byWord.set(key, [...(byWord.get(key) ?? []), capture]);
+    }
+    const outcomes = (
+      await Promise.all(
+        [...byWord.values()].map(async (group) => {
+          const results = [];
+          for (const capture of group) results.push(await enrichCapture(capture, deps));
+          return results;
+        }),
+      )
+    ).flat();
     const counts = Object.fromEntries(
       (['cached', 'generated', 'failed'] as const).map((o) => [o, outcomes.filter((x) => x === o).length]),
     );

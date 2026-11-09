@@ -5,6 +5,8 @@ const MAX_WORD = 100;
 const MAX_SENTENCE = 2000;
 const MAX_PAGE_TITLE = 500;
 const MAX_SOURCE_URL = 2048;
+// Saving the same word in the same sentence again within this long is an accidental double save.
+export const DOUBLE_SAVE_WINDOW_MS = 10 * 60 * 1000;
 
 export interface CaptureInput {
   word: string;
@@ -14,10 +16,14 @@ export interface CaptureInput {
   // Pass the same id when retrying so the upsert stays idempotent (PRD C3).
   clientCaptureId?: string;
   capturedAt?: Date;
+  /** Where it was saved from (the capture_source enum). */
+  source?: 'extension' | 'android' | 'ios' | 'manual';
 }
 
 export type SaveWordResult =
-  | { ok: true; word: string; clientCaptureId: string; queued?: boolean }
+  // duplicate: the same word and sentence were just saved, so this save was skipped and
+  // clientCaptureId is the earlier capture's.
+  | { ok: true; word: string; clientCaptureId: string; queued?: boolean; duplicate?: boolean }
   | { ok: false; reason: 'invalid' | 'signed-out' | 'rejected'; message: string }
   // Offline or server trouble: safe to retry later with the same clientCaptureId.
   | { ok: false; reason: 'retryable'; message: string; word: string; userId?: string };
@@ -56,6 +62,11 @@ export async function saveWord(
     return { ok: false, reason: 'signed-out', message: 'Sign in to Forage to save words.' };
   }
 
+  const capturedAt = input.capturedAt ?? new Date();
+  const sentence = clip(input.sentence, MAX_SENTENCE);
+  const earlier = await findDoubleSave(client, userId, word, sentence, capturedAt, input.clientCaptureId);
+  if (earlier) return { ok: true, word, clientCaptureId: earlier, duplicate: true };
+
   const clientCaptureId = input.clientCaptureId ?? crypto.randomUUID();
   const sourceUrl = input.sourceUrl && input.sourceUrl.length <= MAX_SOURCE_URL ? input.sourceUrl : null;
 
@@ -65,11 +76,11 @@ export async function saveWord(
       user_id: userId,
       client_capture_id: clientCaptureId,
       word,
-      sentence: clip(input.sentence, MAX_SENTENCE),
+      sentence,
       page_title: clip(input.pageTitle, MAX_PAGE_TITLE),
       source_url: sourceUrl,
-      source: 'extension',
-      captured_at: (input.capturedAt ?? new Date()).toISOString(),
+      source: input.source ?? 'extension',
+      captured_at: capturedAt.toISOString(),
     },
     { onConflict: 'user_id,client_capture_id', ignoreDuplicates: true },
   );
@@ -81,4 +92,35 @@ export async function saveWord(
       : { ok: false, reason: 'rejected', message };
   }
   return { ok: true, word, clientCaptureId };
+}
+
+/**
+ * The client_capture_id of the same word in the same sentence saved just before, if any.
+ * Best effort: if the check fails, the save goes ahead and the server still won't count
+ * the repeat as a new encounter.
+ */
+async function findDoubleSave(
+  client: SupabaseClient,
+  userId: string,
+  word: string,
+  sentence: string | null,
+  capturedAt: Date,
+  clientCaptureId: string | undefined,
+): Promise<string | null> {
+  try {
+    let query = client
+      .from('captures')
+      .select('client_capture_id')
+      .eq('user_id', userId)
+      .eq('word', word)
+      .gte('captured_at', new Date(capturedAt.getTime() - DOUBLE_SAVE_WINDOW_MS).toISOString())
+      .lte('captured_at', capturedAt.toISOString());
+    query = sentence === null ? query.is('sentence', null) : query.eq('sentence', sentence);
+    // A retry of this same capture isn't a double save.
+    if (clientCaptureId) query = query.neq('client_capture_id', clientCaptureId);
+    const { data, error } = await query.limit(1).maybeSingle();
+    return error || !data ? null : (data as { client_capture_id: string }).client_capture_id;
+  } catch {
+    return null;
+  }
 }

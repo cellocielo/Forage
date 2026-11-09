@@ -39,6 +39,9 @@ const CARD: PracticeCard = {
   usageChoice: null,
   frameChoices: [],
   hints: { partners: [], example: null, starter: null },
+  definition: 'shockingly bad',
+  otherMeanings: [],
+  examples: [],
 };
 
 const client = {

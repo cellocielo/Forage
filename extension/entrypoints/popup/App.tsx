@@ -98,7 +98,7 @@ function SignedIn({ email }: { email?: string }) {
   );
 }
 
-function SignInForm() {
+export function SignInForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);

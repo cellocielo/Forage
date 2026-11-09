@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useId, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { refreshBadge } from '@/lib/badge';
 import {
   chooseTask,
   describeNextReview,
   disputeAttempt,
   easierTask,
+  fetchExtraCard,
   fetchNextCard,
   hintSteps,
   isAutoChecked,
@@ -19,7 +20,8 @@ import { supabase } from '@/lib/supabase';
 
 type View =
   | { kind: 'loading' }
-  | { kind: 'empty' }
+  // canKeepGoing: there are words that aren't due yet, for "Keep practicing".
+  | { kind: 'empty'; canKeepGoing: boolean }
   | { kind: 'error'; message: string }
   | { kind: 'task'; card: PracticeCard; task: Task }
   | { kind: 'result'; card: PracticeCard; task: Task; result: GradeResult };
@@ -27,32 +29,72 @@ type View =
 /** One practice card (P1): the next ready word, a scaffolded task, hints, and the grade. */
 export function Practice({ dailyCap }: { dailyCap?: number } = {}) {
   const [view, setView] = useState<View>({ kind: 'loading' });
+  // "Keep practicing" mode: words that aren't due yet, each once per session.
+  const [extra, setExtra] = useState(false);
+  const seen = useRef<string[]>([]);
 
-  const loadNext = useCallback(async () => {
-    setView({ kind: 'loading' });
-    try {
-      const card = await fetchNextCard(supabase, new Date(), dailyCap);
-      setView(card ? { kind: 'task', card, task: chooseTask(card) } : { kind: 'empty' });
-    } catch {
-      setView({ kind: 'error', message: "Couldn't load your words. Check your connection and try again." });
-    }
-  }, [dailyCap]);
+  const load = useCallback(
+    async (keepGoing: boolean) => {
+      setView({ kind: 'loading' });
+      try {
+        const now = new Date();
+        let card = await fetchNextCard(supabase, now, dailyCap);
+        if (!card && keepGoing) card = await fetchExtraCard(supabase, now, seen.current);
+        if (card) {
+          seen.current = [...seen.current, card.id];
+          setView({ kind: 'task', card, task: chooseTask(card) });
+          return;
+        }
+        const canKeepGoing = !keepGoing && (await fetchExtraCard(supabase, now, seen.current)) !== null;
+        setView({ kind: 'empty', canKeepGoing });
+      } catch {
+        setView({ kind: 'error', message: "Couldn't load your words. Check your connection and try again." });
+      }
+    },
+    [dailyCap],
+  );
+  const loadNext = useCallback(() => load(extra), [load, extra]);
 
   useEffect(() => {
-    loadNext();
-  }, [loadNext]);
+    load(false);
+  }, [load]);
+
+  function keepPracticing() {
+    setExtra(true);
+    load(true);
+  }
 
   switch (view.kind) {
     case 'loading':
       return <section className="practice" aria-busy="true" aria-label="Loading your next word" />;
     case 'empty':
+      if (extra) {
+        return (
+          <section className="practice">
+            <h1>That's every word</h1>
+            <p className="hint">You've practiced all your words this session. Come back later, or save some new ones.</p>
+          </section>
+        );
+      }
       return (
         <section className="practice">
           <h1>All caught up</h1>
-          <p className="hint">
-            Nothing to practice right now. Select a word on any page, then right-click → Save to Forage, or press
-            Alt+Shift+S.
-          </p>
+          {view.canKeepGoing ? (
+            <>
+              <p className="hint">
+                Nothing is due right now. You can keep practicing words that are coming up soon, starting with the
+                ones due first.
+              </p>
+              <button type="button" onClick={keepPracticing}>
+                Keep practicing
+              </button>
+            </>
+          ) : (
+            <p className="hint">
+              Nothing to practice right now. Select a word on any page, then right-click → Save to Forage, or press
+              Alt+Shift+S.
+            </p>
+          )}
         </section>
       );
     case 'error':
@@ -70,6 +112,7 @@ export function Practice({ dailyCap }: { dailyCap?: number } = {}) {
           key={view.card.id}
           card={view.card}
           initialTask={view.task}
+          extra={extra}
           onGraded={(task, result) => {
             setView({ kind: 'result', card: view.card, task, result });
             refreshBadge(supabase);
@@ -92,10 +135,12 @@ function WordHeading({ card }: { card: PracticeCard }) {
 function TaskCard({
   card,
   initialTask,
+  extra,
   onGraded,
 }: {
   card: PracticeCard;
   initialTask: Task;
+  extra: boolean;
   onGraded: (task: Task, result: GradeResult) => void;
 }) {
   const [task, setTask] = useState(initialTask);
@@ -113,7 +158,7 @@ function TaskCard({
     if (!text.trim() || pending) return;
     setPending(true);
     setError(null);
-    const outcome = await submitAttempt(supabase, card, task, text, hintsShown, easier);
+    const outcome = await submitAttempt(supabase, card, task, text, hintsShown, easier, extra);
     setPending(false);
     if (outcome.ok) onGraded(task, outcome.result);
     else setError(outcome.message);
@@ -285,6 +330,8 @@ function ResultCard({
       )}
       <p className="hint">Next review {describeNextReview(result.scheduled_days)}.</p>
 
+      <LearnMore card={card} />
+
       {dispute.kind === 'done' && <SecondOpinion dispute={dispute.result} isChoice={isChoice} />}
       {dispute.kind === 'error' && <p role="alert">{dispute.message}</p>}
 
@@ -301,6 +348,70 @@ function ResultCard({
         {dispute.kind === 'pending' && <span className="hint">Getting a second opinion…</span>}
       </div>
     </section>
+  );
+}
+
+/** After answering: on request, the word's other meanings and example sentences. */
+function LearnMore({ card }: { card: PracticeCard }) {
+  const [meaningsOpen, setMeaningsOpen] = useState(false);
+  // Index of the example shown, or null before asking for one.
+  const [exampleIndex, setExampleIndex] = useState<number | null>(null);
+  // With one example, the button goes once it's shown.
+  const canShowExample = card.examples.length > 1 || (card.examples.length === 1 && exampleIndex === null);
+
+  function nextExample() {
+    setExampleIndex((i) => (i === null ? 0 : (i + 1) % card.examples.length));
+  }
+
+  return (
+    <div className="learn-more">
+      <div className="actions">
+        <button
+          type="button"
+          className="secondary"
+          aria-expanded={meaningsOpen}
+          onClick={() => setMeaningsOpen((open) => !open)}
+        >
+          {meaningsOpen ? 'Hide meanings' : 'Other meanings'}
+        </button>
+        {canShowExample && (
+          <button type="button" className="secondary" onClick={nextExample}>
+            {exampleIndex === null ? 'Use it in a sentence' : 'Another example'}
+          </button>
+        )}
+      </div>
+
+      {meaningsOpen && (
+        <dl className="hints">
+          <div>
+            <dt>Meaning here</dt>
+            <dd>{card.definition}</dd>
+          </div>
+          <div>
+            <dt>Other meanings</dt>
+            {card.otherMeanings.length > 0 ? (
+              card.otherMeanings.map((other) => (
+                <dd key={other.definition}>
+                  {other.partOfSpeech && <em>{other.partOfSpeech} </em>}
+                  {other.definition}
+                </dd>
+              ))
+            ) : (
+              <dd>This is its only common meaning.</dd>
+            )}
+          </div>
+        </dl>
+      )}
+
+      {exampleIndex !== null && (
+        <figure className="sentence">
+          <figcaption>
+            Example{card.examples.length > 1 ? ` ${exampleIndex + 1} of ${card.examples.length}` : ''}
+          </figcaption>
+          <blockquote>{card.examples[exampleIndex]}</blockquote>
+        </figure>
+      )}
+    </div>
   );
 }
 

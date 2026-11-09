@@ -1,5 +1,6 @@
 import { isAuthStorageKey, refreshBadge } from '@/lib/badge';
 import { flushQueue } from '@/lib/capture-queue';
+import { createLookupMeaningListener } from '@/lib/meaning-messages';
 import { createSaveWordListener } from '@/lib/messaging';
 import { maybeRemind, NOTIFICATION_ID, type ReminderContent, respondToReminder } from '@/lib/reminders';
 import { supabase } from '@/lib/supabase';
@@ -36,6 +37,8 @@ export default defineBackground(() => {
       browser.alarms.create(BADGE_AFTER_SAVE_ALARM, { delayInMinutes: BADGE_AFTER_SAVE_MINUTES });
     }),
   );
+
+  browser.runtime.onMessage.addListener(createLookupMeaningListener(supabase));
 
   // Sync offline captures and refresh the badge when the worker wakes, when the network
   // returns, and every few minutes (cards come due as time passes).

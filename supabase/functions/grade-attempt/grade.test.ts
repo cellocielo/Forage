@@ -73,6 +73,7 @@ const REQUEST: GradeRequest = {
   answer: 'the crowd booed.',
   hints_used: 0,
   easier: false,
+  extra: false,
 };
 
 function fakeDeps(overrides: Partial<GradeDeps> = {}) {
@@ -321,4 +322,10 @@ Deno.test('gradeAttempt grades a pick without the model, recording the filled se
   assertEquals(recorded[0]![2].hints_used, 0);
   assertEquals(recorded[0]![2].sentence, "The judge's ruling was so egregious that everyone cheered.");
   assertEquals(outcome.verdict.corrected_sentence, "The judge's ruling was so egregious that the crowd booed.");
+});
+
+Deno.test('gradeAttempt accepts a word that is not due yet as extra practice', async () => {
+  const { deps } = fakeDeps({ loadCard: () => Promise.resolve({ ...CARD, due: '2026-11-05T00:00:00.000Z' }) });
+  const outcome = await gradeAttempt({ ...REQUEST, extra: true }, deps);
+  assert(outcome.ok);
 });

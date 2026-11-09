@@ -1,5 +1,6 @@
 import { FunctionsHttpError, type SupabaseClient } from '@supabase/supabase-js';
-import { countReadyWords, DAILY_CAP } from './badge';
+import { countReadyWords, DAILY_CAP } from './ready';
+import { parseOtherMeanings, type OtherMeaning, type OtherMeaningsColumn } from './meaning';
 
 /**
  * Easiest first: pick the right usage, pick the ending for a frame, type the ending, write for
@@ -39,6 +40,10 @@ export interface PracticeCard {
   /** One per frame, in the same order; null where a frame has no choice. */
   frameChoices: Array<FrameChoice | null>;
   hints: { partners: string[]; example: string | null; starter: string | null };
+  /** Shown after answering: this meaning, its other meanings, and example sentences. */
+  definition: string;
+  otherMeanings: OtherMeaning[];
+  examples: string[];
 }
 
 export interface Task {
@@ -153,7 +158,7 @@ const CARD_SELECT = `
   captures!inner (
     word,
     lemmas ( lemma ),
-    senses!inner ( part_of_speech, frames, frame_choices, scenarios, usage_choice, hint_partners, hint_example, hint_starter )
+    senses!inner ( part_of_speech, definition, examples, other_meanings, frames, frame_choices, scenarios, usage_choice, hint_partners, hint_example, hint_starter )
   )
 `;
 
@@ -167,6 +172,9 @@ interface CardQueryRow {
     lemmas: { lemma: string } | null;
     senses: {
       part_of_speech: string;
+      definition: string;
+      examples: string[] | null;
+      other_meanings: OtherMeaningsColumn;
       frames: string[] | null;
       scenarios: Scenario[] | null;
       usage_choice: UsageChoice | null;
@@ -197,6 +205,10 @@ function toPracticeCard(row: CardQueryRow): PracticeCard {
       example: sense.hint_example,
       starter: sense.hint_starter,
     },
+    definition: sense.definition,
+    otherMeanings: parseOtherMeanings(sense.other_meanings),
+    // The hint example is used up by then, so it's one more to show.
+    examples: [...new Set([...(sense.examples ?? []), ...(sense.hint_example ? [sense.hint_example] : [])])],
   };
 }
 
@@ -221,6 +233,27 @@ export async function fetchNextCard(
     .order('due', { ascending: true })
     .limit(1)
     .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data ? toPracticeCard(data as unknown as CardQueryRow) : null;
+}
+
+/**
+ * "Keep practicing": once nothing is ready, the word due soonest that hasn't come up in this
+ * session, or null if every word has. Snoozed and archived words stay out.
+ */
+export async function fetchExtraCard(
+  client: SupabaseClient,
+  now: Date = new Date(),
+  seenIds: string[] = [],
+): Promise<PracticeCard | null> {
+  const nowIso = now.toISOString();
+  let query = client
+    .from('cards')
+    .select(CARD_SELECT)
+    .is('archived_at', null)
+    .or(`snoozed_until.is.null,snoozed_until.lte."${nowIso}"`);
+  if (seenIds.length > 0) query = query.not('id', 'in', `(${seenIds.join(',')})`);
+  const { data, error } = await query.order('due', { ascending: true }).limit(1).maybeSingle();
   if (error) throw new Error(error.message);
   return data ? toPracticeCard(data as unknown as CardQueryRow) : null;
 }
@@ -267,6 +300,7 @@ export function submitAttempt(
   answer: string,
   hintsUsed: number,
   easier = false,
+  extra = false,
 ): Promise<SubmitResult> {
   return callFunction<GradeResult>(
     client,
@@ -278,6 +312,7 @@ export function submitAttempt(
       answer: answer.trim(),
       hints_used: isAutoChecked(task.type) ? 0 : hintsUsed,
       easier,
+      extra,
     },
     "Couldn't grade right now. Check your connection and try again.",
   );
