@@ -10,6 +10,9 @@ const src = fileURLToPath(new URL('./src', import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
+  // Compile the shared extension files with this tsconfig too: theirs extends one that only
+  // exists after the extension's `wxt prepare`, which hosts like Vercel never run.
+  tsconfig: './tsconfig.json',
   // Same project keys as the extension; set these in the host's environment for deploys.
   envDir: extension,
   envPrefix: 'WXT_',
