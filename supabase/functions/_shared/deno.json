@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "ts-fsrs": "npm:ts-fsrs@5.4.2",
+    "@std/assert": "jsr:@std/assert@1"
+  }
+}

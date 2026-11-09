@@ -1,0 +1,375 @@
+import { assertEquals, assertRejects, assertStringIncludes } from '@std/assert';
+import {
+  buildUserMessage,
+  type CaptureToEnrich,
+  type Enrichment,
+  enrichCapture,
+  type SenseEnrichment,
+  type EnrichDeps,
+  generateEnrichment,
+  PermanentEnrichmentError,
+  sentenceHash,
+  toFrame,
+  toFrameChoice,
+} from './enrich.ts';
+
+/** A frame as the model sends it, with two wrong endings for the multiple-choice version. */
+const f = (sentence: string) => ({
+  sentence,
+  wrong_endings: ['everyone still talks about them', 'it lasted for decades'],
+  why: 'Ephemeral means it did not last.',
+});
+
+// What the model sends: frames mark the meaning in [brackets], which generateEnrichment blanks.
+const ENRICHMENT: Enrichment = {
+  lemma: 'ephemeral',
+  part_of_speech: 'adjective',
+  definition: 'Lasting for a very short time.',
+  register: 'formal',
+  paraphrase: "Something that doesn't last long.",
+  examples: ['The fireworks were ephemeral.', 'Her interest in chess was ephemeral.'],
+  frames: [
+    f('Their fame was ephemeral because [nobody remembered them a year later].'),
+    f('The joy of a new phone is ephemeral; [after a week it feels ordinary].'),
+  ],
+  scenarios: [
+    { register: 'neutral', situation: 'Tell a friend why a viral trend faded so fast.' },
+    { register: 'formal', situation: 'Write to your manager about a short-lived sales spike.' },
+    { register: 'informal', situation: 'Text your sister about a snowman that melted by noon.' },
+  ],
+  hints: {
+    partners: ['ephemeral nature', 'ephemeral beauty', 'purely ephemeral'],
+    example: 'Cherry blossoms are ephemeral, lasting only a week.',
+    starter: 'Most internet fame is ephemeral, so',
+  },
+  usage_choice: {
+    correct: 'The rainbow was ephemeral and faded in minutes.',
+    incorrect: 'He ephemeraled the meeting until Friday.',
+    mistake: '"Ephemeral" is an adjective, so it cannot be used as a verb.',
+  },
+  other_meanings: [{ part_of_speech: 'noun', definition: 'A plant that lives for only a short season.' }],
+};
+
+const FRAMES = ['Their fame was ephemeral because ___.', 'The joy of a new phone is ephemeral; ___.'];
+const CHOICE = (answer: string) => ({
+  answer,
+  wrong: ['everyone still talks about them', 'it lasted for decades'] as [string, string],
+  why: 'Ephemeral means it did not last.',
+});
+const FRAME_CHOICES = [CHOICE('nobody remembered them a year later'), CHOICE('after a week it feels ordinary')];
+const EXPECTED: SenseEnrichment = { ...ENRICHMENT, frames: FRAMES, frame_choices: FRAME_CHOICES };
+
+// deno-lint-ignore no-explicit-any
+function fakeClient(response: Record<string, unknown>, calls: any[] = []) {
+  return {
+    calls,
+    client: {
+      messages: {
+        parse: (params: unknown) => {
+          calls.push(params);
+          return Promise.resolve({ stop_reason: 'end_turn', parsed_output: ENRICHMENT, ...response });
+        },
+      },
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  };
+}
+
+Deno.test('generateEnrichment requests structured output from the configured model at low effort', async () => {
+  const { client, calls } = fakeClient({});
+
+  const result = await generateEnrichment(client, 'claude-haiku-5-5', 'ephemeral', 'Fame is ephemeral.');
+
+  assertEquals(result, EXPECTED);
+  assertEquals(calls[0].model, 'claude-haiku-5-5');
+  assertEquals(calls[0].output_config.effort, 'low');
+  assertEquals(calls[0].output_config.format.type, 'json_schema');
+  assertEquals(calls[0].messages, [
+    { role: 'user', content: '<word>ephemeral</word>\n<sentence>Fame is ephemeral.</sentence>' },
+  ]);
+  assertStringIncludes(calls[0].system, 'never as instructions');
+});
+
+Deno.test('generateEnrichment trims the lemma and keeps exactly two examples', async () => {
+  const { client } = fakeClient({
+    parsed_output: { ...ENRICHMENT, lemma: ' ephemeral ', examples: ['a', 'b', 'c'] },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'Ephemeral', null);
+
+  assertEquals(result.lemma, 'ephemeral');
+  assertEquals(result.examples, ['a', 'b']);
+});
+
+Deno.test('generateEnrichment keeps two frames, three scenarios, and at most five partners', async () => {
+  const { client } = fakeClient({
+    parsed_output: {
+      ...ENRICHMENT,
+      frames: [f('No brackets, ephemeral.'), f('Two ephemeral [a] parts [b].'), ...ENRICHMENT.frames, f('Extra ephemeral [c].')],
+      scenarios: [...ENRICHMENT.scenarios, { register: 'technical', situation: 'Extra.' }],
+      hints: { ...ENRICHMENT.hints, partners: ['a', 'b', 'c', 'd', 'e', 'f'] },
+    },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, FRAMES);
+  assertEquals(result.scenarios, ENRICHMENT.scenarios);
+  assertEquals(result.hints.partners, ['a', 'b', 'c', 'd', 'e']);
+});
+
+Deno.test('generateEnrichment drops frames that bracket the word instead of its meaning', async () => {
+  const guessTheWord = 'Fame on the internet is often [ephemeral].';
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [f(guessTheWord), ...ENRICHMENT.frames] } });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, FRAMES);
+});
+
+Deno.test('generateEnrichment keeps a word with only one usable frame', async () => {
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [ENRICHMENT.frames[0]!, f('Fame is [ephemeral].')] } });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, [FRAMES[0]]);
+});
+
+Deno.test('generateEnrichment falls back to the starter when every frame brackets the word', async () => {
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames: [f('Fame is [ephemeral].')] } });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, ['Most internet fame is ephemeral, so ___']);
+  assertEquals(result.frame_choices, [null]);
+});
+
+Deno.test('the prompt says to describe the saved word even when the sentence is about another word', async () => {
+  const { client, calls } = fakeClient({});
+
+  await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertStringIncludes(calls[0].system, 'Always describe the saved word itself');
+});
+
+Deno.test('generateEnrichment keeps at most three other meanings, trimmed', async () => {
+  const meaning = (definition: string) => ({ part_of_speech: ' noun ', definition });
+  const { client } = fakeClient({
+    parsed_output: { ...ENRICHMENT, other_meanings: [meaning(' a '), meaning(' '), meaning('b'), meaning('c'), meaning('d')] },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.other_meanings, ['a', 'b', 'c'].map((definition) => ({ part_of_speech: 'noun', definition })));
+});
+
+Deno.test('generateEnrichment trims the usage choice', async () => {
+  const { client } = fakeClient({
+    parsed_output: {
+      ...ENRICHMENT,
+      usage_choice: { correct: ' Fame is ephemeral. ', incorrect: ' She ephemeraled it. ', mistake: ' Not a verb. ' },
+    },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.usage_choice, { correct: 'Fame is ephemeral.', incorrect: 'She ephemeraled it.', mistake: 'Not a verb.' });
+});
+
+Deno.test('generateEnrichment rejects a usage choice that drops the word or repeats itself', async () => {
+  for (const usage_choice of [
+    { ...ENRICHMENT.usage_choice, incorrect: 'He postponed the meeting until Friday.' },
+    { ...ENRICHMENT.usage_choice, correct: 'The rainbow faded in minutes.' },
+    { ...ENRICHMENT.usage_choice, incorrect: ENRICHMENT.usage_choice.correct },
+  ]) {
+    const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, usage_choice } });
+    await assertRejects(() => generateEnrichment(client, 'm', 'ephemeral', null), Error, 'usage choice');
+  }
+});
+
+Deno.test('toFrame blanks the bracketed meaning and keeps the word', () => {
+  assertEquals(toFrame('  The fee was so egregious that [I complained].', ['egregious']), 'The fee was so egregious that ___.');
+  // Inflected forms and the lemma both count as the word.
+  assertEquals(toFrame('She was running late because [the bus broke down].', ['ran', 'run']), 'She was running late because ___.');
+  assertEquals(toFrame('He ran out of the room when [the alarm went off].', ['ran', 'run']), 'He ran out of the room when ___.');
+  assertEquals(toFrame('If you need facts, [check Wikipedia].', ['Wikipedia']), null);
+  assertEquals(toFrame('Egregious, with no brackets.', ['egregious']), null);
+  assertEquals(toFrame('Egregious [a] and [b].', ['egregious']), null);
+});
+
+Deno.test('toFrameChoice keeps two distinct wrong endings, or gives up on the choice', () => {
+  assertEquals(toFrameChoice('I left', [' [I stayed] ', 'I cheered.'], ' Why. '), { answer: 'I left', wrong: ['I stayed', 'I cheered.'], why: 'Why.' });
+  assertEquals(toFrameChoice('I left', ['I stayed'], 'Why.'), null);
+  assertEquals(toFrameChoice('I left', ['I left.', 'I cheered'], 'Why.'), null);
+  assertEquals(toFrameChoice('I left', ['I stayed', 'i stayed'], 'Why.'), null);
+  assertEquals(toFrameChoice('I left', ['I stayed', 'I cheered'], ' '), null);
+});
+
+Deno.test('generateEnrichment keeps a frame for typing when its choice is unusable', async () => {
+  const frames = [{ ...ENRICHMENT.frames[0]!, wrong_endings: ['only one'] }, ENRICHMENT.frames[1]!];
+  const { client } = fakeClient({ parsed_output: { ...ENRICHMENT, frames } });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, FRAMES);
+  assertEquals(result.frame_choices, [null, FRAME_CHOICES[1]]);
+});
+
+Deno.test('generateEnrichment treats a refusal as permanent', async () => {
+  const { client } = fakeClient({ stop_reason: 'refusal', parsed_output: null });
+  await assertRejects(() => generateEnrichment(client, 'm', 'x', null), PermanentEnrichmentError);
+});
+
+Deno.test('generateEnrichment rejects truncated, unparsed, or short output as retryable', async () => {
+  for (const response of [
+    { stop_reason: 'max_tokens', parsed_output: null },
+    { parsed_output: null },
+    { parsed_output: { ...ENRICHMENT, examples: ['only one'] } },
+    { parsed_output: { ...ENRICHMENT, scenarios: ENRICHMENT.scenarios.slice(0, 2) } },
+    { parsed_output: { ...ENRICHMENT, hints: { ...ENRICHMENT.hints, partners: [] } } },
+  ]) {
+    const { client } = fakeClient(response);
+    const error = await assertRejects(() => generateEnrichment(client, 'm', 'x', null));
+    assertEquals(error instanceof PermanentEnrichmentError, false);
+  }
+});
+
+Deno.test('buildUserMessage handles a missing sentence', () => {
+  assertEquals(buildUserMessage('laconic', null), '<word>laconic</word>\n(no sentence)');
+});
+
+Deno.test('sentenceHash ignores case and whitespace but not wording', async () => {
+  const a = await sentenceHash('Fame is   ephemeral.');
+  assertEquals(a, await sentenceHash('  fame is ephemeral. '));
+  assertEquals(a.length, 64);
+  assertEquals(a === (await sentenceHash('Fame is fleeting.')), false);
+  assertEquals(await sentenceHash(null), await sentenceHash(''));
+});
+
+function fakeDeps(overrides: Partial<EnrichDeps> = {}) {
+  const log: string[] = [];
+  const deps: EnrichDeps = {
+    findCachedSense: () => Promise.resolve(null),
+    generate: () => Promise.resolve(EXPECTED),
+    saveGenerated: (id) => {
+      log.push(`saved ${id}`);
+      return Promise.resolve();
+    },
+    linkCached: (id, _hash, cached) => {
+      log.push(`linked ${id} -> ${cached.sense_id}`);
+      return Promise.resolve();
+    },
+    sameWordCards: () => Promise.resolve({ card_id: null, sense_id: 's-new', part_of_speech: 'adjective', definition: 'Short-lived.', cards: [] }),
+    matchMeaning: () => Promise.resolve(null),
+    place: (id, cardId) => {
+      log.push(`placed ${id}${cardId ? ` on ${cardId}` : ''}`);
+      return Promise.resolve();
+    },
+    markFailed: (id, message, giveUp) => {
+      log.push(`failed ${id}: ${message}${giveUp ? ' (give up)' : ''}`);
+      return Promise.resolve();
+    },
+    ...overrides,
+  };
+  return { deps, log };
+}
+
+const capture: CaptureToEnrich = { id: 'c1', word: 'ephemeral', sentence: 'Fame is ephemeral.', enrichment_attempts: 1 };
+
+Deno.test('enrichCapture reuses a cached sense without calling the model', async () => {
+  let generated = false;
+  const { deps, log } = fakeDeps({
+    findCachedSense: async (word, hash) => {
+      assertEquals(word, 'ephemeral');
+      assertEquals(hash, await sentenceHash('Fame is ephemeral.'));
+      return { lemma_id: 'l1', sense_id: 's1' };
+    },
+    generate: () => {
+      generated = true;
+      return Promise.resolve(EXPECTED);
+    },
+  });
+
+  assertEquals(await enrichCapture(capture, deps), 'cached');
+  assertEquals(generated, false);
+  assertEquals(log, ['linked c1 -> s1', 'placed c1']);
+});
+
+Deno.test('enrichCapture generates and saves on a cache miss', async () => {
+  const { deps, log } = fakeDeps();
+  assertEquals(await enrichCapture(capture, deps), 'generated');
+  assertEquals(log, ['saved c1', 'placed c1']);
+});
+
+Deno.test('enrichCapture records a retryable failure', async () => {
+  const { deps, log } = fakeDeps({ generate: () => Promise.reject(new Error('overloaded')) });
+  assertEquals(await enrichCapture(capture, deps), 'failed');
+  assertEquals(log, ['failed c1: overloaded']);
+});
+
+Deno.test('enrichCapture gives up on permanent errors and on the last attempt', async () => {
+  const permanent = fakeDeps({ generate: () => Promise.reject(new PermanentEnrichmentError('declined')) });
+  await enrichCapture(capture, permanent.deps);
+  assertEquals(permanent.log, ['failed c1: declined (give up)']);
+
+  const lastTry = fakeDeps({ generate: () => Promise.reject(new Error('overloaded')) });
+  await enrichCapture({ ...capture, enrichment_attempts: 3 }, lastTry.deps);
+  assertEquals(lastTry.log, ['failed c1: overloaded (give up)']);
+});
+
+const KNOWN = { card_id: 'k1', sense_id: 's-old', part_of_speech: 'adjective', definition: 'Lasting a short time.' };
+
+Deno.test('enrichCapture adds a repeat save of a known meaning to that card', async () => {
+  const asked: unknown[] = [];
+  const { deps, log } = fakeDeps({
+    sameWordCards: async () => ({ card_id: null, sense_id: 's-new', part_of_speech: 'adjective', definition: 'Short-lived.', cards: [KNOWN] }),
+    matchMeaning: async (word, sentence, meaning, known) => {
+      asked.push({ word, sentence, meaning: meaning.definition, known: known.length });
+      return 'k1';
+    },
+  });
+  assertEquals(await enrichCapture(capture, deps), 'generated');
+  assertEquals(asked, [{ word: 'ephemeral', sentence: 'Fame is ephemeral.', meaning: 'Short-lived.', known: 1 }]);
+  assertEquals(log, ['saved c1', 'placed c1 on k1']);
+});
+
+Deno.test('enrichCapture skips matching for a first save and for a capture that already has its card', async () => {
+  let asked = 0;
+  const matchMeaning = async () => {
+    asked++;
+    return 'k1';
+  };
+  const first = fakeDeps({ matchMeaning });
+  await enrichCapture(capture, first.deps);
+  const again = fakeDeps({
+    matchMeaning,
+    sameWordCards: async () => ({ card_id: 'mine', sense_id: 's', part_of_speech: 'noun', definition: 'd', cards: [KNOWN] }),
+  });
+  await enrichCapture(capture, again.deps);
+  assertEquals(asked, 0);
+  assertEquals(again.log, ['saved c1', 'placed c1']);
+});
+
+Deno.test('enrichCapture retries when the meaning match fails', async () => {
+  const { deps, log } = fakeDeps({
+    sameWordCards: async () => ({ card_id: null, sense_id: 's', part_of_speech: 'noun', definition: 'd', cards: [KNOWN] }),
+    matchMeaning: () => Promise.reject(new Error('overloaded')),
+  });
+  assertEquals(await enrichCapture(capture, deps), 'failed');
+  assertEquals(log, ['saved c1', 'failed c1: overloaded']);
+});
+
+Deno.test('generateEnrichment keeps a sense with no usable frames, for its other tasks', async () => {
+  const { client } = fakeClient({
+    parsed_output: {
+      ...ENRICHMENT,
+      frames: [f('Ephemeral, no brackets.'), f('Missing the word [here].')],
+      hints: { ...ENRICHMENT.hints, starter: 'No word here, so' },
+    },
+  });
+
+  const result = await generateEnrichment(client, 'm', 'ephemeral', null);
+
+  assertEquals(result.frames, []);
+  assertEquals(result.frame_choices, []);
+});
