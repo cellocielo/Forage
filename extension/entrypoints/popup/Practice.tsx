@@ -230,7 +230,7 @@ function TaskCard({
       {task.type !== 'frame' && (
         <>
           <p className="prompt">
-            {task.register && <span className="register">{task.register}</span>}
+            {task.register && <span className="register">{task.register} tone</span>}
             {task.prompt}
           </p>
           <label htmlFor={answerId}>{task.type === 'scenario' ? `Your sentence, using "${card.word}"` : 'Your sentence'}</label>
@@ -310,7 +310,7 @@ function ResultCard({
     <section className="practice" aria-live="polite">
       <WordHeading card={card} />
       <p className="prompt task-recap">
-        {task.register && <span className="register">{task.register}</span>}
+        {task.register && <span className="register">{task.register} tone</span>}
         {task.prompt}
       </p>
       <p className={`rating rating-${result.rating}`}>

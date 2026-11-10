@@ -116,7 +116,7 @@ describe('Practice', () => {
     render(<Practice />);
 
     expect(await screen.findByText('Email the league office.')).toBeTruthy();
-    expect(screen.getByText('formal')).toBeTruthy();
+    expect(screen.getByText('formal tone')).toBeTruthy();
     expect(screen.getByLabelText('Your sentence, using "egregious"').tagName).toBe('TEXTAREA');
   });
 
