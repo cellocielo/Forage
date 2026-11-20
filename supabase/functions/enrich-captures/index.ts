@@ -5,14 +5,22 @@ import {
   enrichCapture,
   type CaptureToEnrich,
   type EnrichDeps,
-  generateEnrichment,
+  generateMeaning,
+  generatePractice,
+  generateVariety,
   MAX_ATTEMPTS,
   PROMPT_VERSION,
   type SameWordCards,
+  type SenseNeedingPractice,
+  type SenseNeedingVariety,
 } from './enrich.ts';
 import { matchMeaning } from './match.ts';
 
 const BATCH_SIZE = 10;
+// Practice material for senses whose meaning was just saved (or whose earlier try failed).
+const PRACTICE_BATCH_SIZE = 10;
+// Older senses topped up with more practice per run, when there's room after new captures.
+const VARIETY_BATCH_SIZE = 5;
 const model = Deno.env.get('ENRICH_MODEL') ?? DEFAULT_MODEL;
 
 // Called by pg_cron with a project secret key; not callable by users.
@@ -39,12 +47,12 @@ Deno.serve(
         if (error) throw new Error(error.message);
         return data?.[0] ?? null;
       },
-      generate: (word, sentence) => generateEnrichment(anthropic, model, word, sentence),
-      async saveGenerated(captureId, hash, enrichment) {
-        const { error } = await db.rpc('save_capture_enrichment', {
+      generate: (word, sentence, context) => generateMeaning(anthropic, model, word, sentence, context),
+      async saveGenerated(captureId, hash, meaning) {
+        const { error } = await db.rpc('save_capture_meaning', {
           p_capture_id: captureId,
           p_sentence_hash: hash,
-          p_enrichment: enrichment,
+          p_meaning: meaning,
           p_model: model,
           p_prompt_version: PROMPT_VERSION,
         });
@@ -101,6 +109,55 @@ Deno.serve(
     const counts = Object.fromEntries(
       (['cached', 'generated', 'failed'] as const).map((o) => [o, outcomes.filter((x) => x === o).length]),
     );
-    return Response.json({ claimed: outcomes.length, ...counts });
+
+    // Meanings are saved and shown; now the practice material for them, which nobody waits on.
+    const { data: pending, error: practiceClaimError } = await db.rpc('claim_senses_for_practice', {
+      batch_size: PRACTICE_BATCH_SIZE,
+    });
+    if (practiceClaimError) console.warn('enrich: could not claim senses for practice', practiceClaimError.message);
+    const practiceResults = await Promise.all(
+      ((pending ?? []) as SenseNeedingPractice[]).map(async (sense) => {
+        try {
+          const practice = await generatePractice(anthropic, model, sense);
+          const { error } = await db.rpc('save_sense_practice', { p_sense_id: sense.id, p_practice: practice });
+          if (error) throw new Error(error.message);
+          return true;
+        } catch (error) {
+          // Claimed with an attempt counted, so the minute job retries it a few times.
+          console.warn('enrich: could not write practice', sense.id, error instanceof Error ? error.message : error);
+          return false;
+        }
+      }),
+    );
+    const practiced = practiceResults.filter(Boolean).length;
+
+    // New words come first; older senses get more practice with whatever room is left.
+    const varietyRoom = Math.min(VARIETY_BATCH_SIZE, BATCH_SIZE - captures.length - practiceResults.length);
+    let varied = 0;
+    if (varietyRoom > 0) {
+      const { data: senses, error: claimError } = await db.rpc('claim_senses_for_variety', { batch_size: varietyRoom });
+      if (claimError) console.warn('enrich: could not claim senses for variety', claimError.message);
+      const results = await Promise.all(
+        ((senses ?? []) as SenseNeedingVariety[]).map(async (sense) => {
+          try {
+            const variety = await generateVariety(anthropic, model, sense);
+            const { error } = await db.rpc('save_sense_variety', {
+              p_sense_id: sense.id,
+              p_usage_choices: variety.usage_choices,
+              p_frames: variety.frames,
+              p_frame_choices: variety.frame_choices,
+            });
+            if (error) throw new Error(error.message);
+            return true;
+          } catch (error) {
+            // Claimed with an attempt counted, so it's retried a few times and then left alone.
+            console.warn('enrich: could not add variety', sense.id, error instanceof Error ? error.message : error);
+            return false;
+          }
+        }),
+      );
+      varied = results.filter(Boolean).length;
+    }
+    return Response.json({ claimed: outcomes.length, ...counts, practiced, varied });
   }),
 );

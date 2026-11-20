@@ -97,8 +97,12 @@ export function choiceQuestion(
   sense: PracticeSense,
 ): { index: number; options: string[]; keyed: string } | null {
   if (attempt.task_type === 'choice') {
-    const choice = sense.usage_choice;
-    return choice ? { index: 0, options: [choice.correct, choice.incorrect], keyed: choice.correct } : null;
+    // The pair shown is the one the picked sentence belongs to.
+    const index = (sense.usage_choices ?? []).findIndex(
+      (c) => c !== null && (c.correct === attempt.answer || c.incorrect === attempt.answer),
+    );
+    const choice = index >= 0 ? sense.usage_choices![index]! : null;
+    return choice ? { index, options: [choice.correct, choice.incorrect], keyed: choice.correct } : null;
   }
   const index = sense.frames?.indexOf(attempt.prompt) ?? -1;
   const choice = index >= 0 ? sense.frame_choices?.[index] : null;
@@ -125,6 +129,7 @@ async function disputeChoice(attempt: AttemptToDispute, sense: PracticeSense, de
     corrected_sentence: review.picked_is_correct ? attempt.sentence : question.keyed,
     rationale: review.reason,
     score: review.picked_is_correct ? 3 : 1,
+    unsure: false,
   };
   const outcome = await settle(attempt, verdict, review.picked_is_correct ? 3 : 1, deps);
   if (outcome.ok && review.picked_is_correct) {

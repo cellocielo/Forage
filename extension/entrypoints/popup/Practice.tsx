@@ -3,16 +3,19 @@ import { refreshBadge } from '@/lib/badge';
 import {
   chooseTask,
   describeNextReview,
+  describeWhen,
   disputeAttempt,
   easierTask,
   fetchExtraCard,
   fetchNextCard,
+  fetchNextPractice,
   hintSteps,
   isAutoChecked,
   RATING_LABELS,
   submitAttempt,
   type DisputeResult,
   type GradeResult,
+  type NextPractice,
   type PracticeCard,
   type Task,
 } from '@/lib/practice';
@@ -21,13 +24,20 @@ import { supabase } from '@/lib/supabase';
 type View =
   | { kind: 'loading' }
   // canKeepGoing: there are words that aren't due yet, for "Keep practicing".
-  | { kind: 'empty'; canKeepGoing: boolean }
+  // next: when practice opens up again, if that's known.
+  | { kind: 'empty'; canKeepGoing: boolean; next: NextPractice | null }
   | { kind: 'error'; message: string }
   | { kind: 'task'; card: PracticeCard; task: Task }
   | { kind: 'result'; card: PracticeCard; task: Task; result: GradeResult };
 
+interface PracticeProps {
+  dailyCap?: number;
+  /** A reminder will say when words are ready, so the caught-up screen can say so. */
+  remindsWhenReady?: boolean;
+}
+
 /** One practice card (P1): the next ready word, a scaffolded task, hints, and the grade. */
-export function Practice({ dailyCap }: { dailyCap?: number } = {}) {
+export function Practice({ dailyCap, remindsWhenReady = false }: PracticeProps = {}) {
   const [view, setView] = useState<View>({ kind: 'loading' });
   // "Keep practicing" mode: words that aren't due yet, each once per session.
   const [extra, setExtra] = useState(false);
@@ -39,14 +49,23 @@ export function Practice({ dailyCap }: { dailyCap?: number } = {}) {
       try {
         const now = new Date();
         let card = await fetchNextCard(supabase, now, dailyCap);
-        if (!card && keepGoing) card = await fetchExtraCard(supabase, now, seen.current);
+        // Words that aren't due yet get typing tasks, not multiple choice.
+        let early = false;
+        if (!card && keepGoing) {
+          card = await fetchExtraCard(supabase, now, seen.current);
+          early = card !== null;
+        }
         if (card) {
           seen.current = [...seen.current, card.id];
-          setView({ kind: 'task', card, task: chooseTask(card) });
+          setView({ kind: 'task', card, task: chooseTask(card, { extra: early }) });
           return;
         }
-        const canKeepGoing = !keepGoing && (await fetchExtraCard(supabase, now, seen.current)) !== null;
-        setView({ kind: 'empty', canKeepGoing });
+        const [canKeepGoing, next] = await Promise.all([
+          keepGoing ? false : fetchExtraCard(supabase, now, seen.current).then((c) => c !== null),
+          // Nice to know, so the caught-up screen still shows without it.
+          fetchNextPractice(supabase, now).catch(() => null),
+        ]);
+        setView({ kind: 'empty', canKeepGoing, next });
       } catch {
         setView({ kind: 'error', message: "Couldn't load your words. Check your connection and try again." });
       }
@@ -79,11 +98,12 @@ export function Practice({ dailyCap }: { dailyCap?: number } = {}) {
       return (
         <section className="practice">
           <h1>All caught up</h1>
+          <NextUp next={view.next} dailyCap={dailyCap} remindsWhenReady={remindsWhenReady} />
           {view.canKeepGoing ? (
             <>
               <p className="hint">
-                Nothing is due right now. You can keep practicing words that are coming up soon, starting with the
-                ones due first.
+                {view.next ? '' : 'Nothing is due right now. '}You can keep practicing words that are coming up soon,
+                starting with the ones due first.
               </p>
               <button type="button" onClick={keepPracticing}>
                 Keep practicing
@@ -150,7 +170,7 @@ function TaskCard({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const answerId = useId();
-  const steps = hintSteps(card);
+  const steps = hintSteps(card, task);
   const nextHint = steps[hintsShown];
   const easierOption = easierTask(card, task);
 
@@ -339,15 +359,44 @@ function ResultCard({
         <button type="button" autoFocus onClick={onNext}>
           Next word
         </button>
-        {/* A right multiple-choice answer has nothing to dispute; a wrong one may mean a faulty question. */}
-        {(!isChoice || result.rating < 3) && (dispute.kind === 'idle' || dispute.kind === 'error') && (
-          <button type="button" className="secondary" onClick={disagree}>
-            I disagree
-          </button>
-        )}
-        {dispute.kind === 'pending' && <span className="hint">Getting a second opinion…</span>}
       </div>
+      {/* A quiet way out, not a step: low and unsure grades are already checked by a stronger
+          model. A right multiple-choice answer has nothing to dispute; a wrong one may mean a
+          faulty question. */}
+      {(!isChoice || result.rating < 3) && (dispute.kind === 'idle' || dispute.kind === 'error') && (
+        <button type="button" className="link dispute-link" onClick={disagree}>
+          {isChoice ? 'Think this question is wrong?' : 'Think this grade is wrong?'}
+        </button>
+      )}
+      {dispute.kind === 'pending' && <p className="hint dispute-link">Taking another look…</p>}
     </section>
+  );
+}
+
+/** On the caught-up screen: roughly when the next word is ready. */
+function NextUp({
+  next,
+  dailyCap,
+  remindsWhenReady,
+}: {
+  next: NextPractice | null;
+  dailyCap?: number;
+  remindsWhenReady: boolean;
+}) {
+  if (!next) return null;
+  const remind = remindsWhenReady ? " We'll remind you when it's ready." : '';
+  if (next.kind === 'cap') {
+    const done = dailyCap ? `today's ${dailyCap} ${dailyCap === 1 ? 'word' : 'words'}` : "today's words";
+    return (
+      <p className="next-up">
+        You've done {done}. More tomorrow.{remindsWhenReady && " We'll remind you."}
+      </p>
+    );
+  }
+  return (
+    <p className="next-up">
+      Next word due {describeWhen(next.at)}.{remind}
+    </p>
   );
 }
 

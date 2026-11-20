@@ -4,23 +4,27 @@ import type { CardRow } from '../_shared/scheduling.ts';
 import {
   type CardToGrade,
   DEFAULT_MODEL,
+  DISPUTE_MODEL,
   type GradeDeps,
   gradeAttempt,
   GradeRequestSchema,
   GradingRefusedError,
+  generateSecondOpinion,
   generateVerdict,
   type PracticeSense,
   PROMPT_VERSION,
 } from './grade.ts';
 
 const model = Deno.env.get('GRADE_MODEL') ?? DEFAULT_MODEL;
+// The stronger model that checks low or unsure grades before they're shown (G6).
+const checkModel = Deno.env.get('DISPUTE_MODEL') ?? DISPUTE_MODEL;
 
 // RLS on cards, captures and senses limits this to the caller's own words.
 const CARD_SELECT = `
   id, due, stability, difficulty, scheduled_days, learning_steps, reps, lapses, state, last_review, archived_at,
   captures!inner (
     lemmas ( lemma ),
-    senses ( id, part_of_speech, definition, frames, scenarios, usage_choice, frame_choices )
+    senses ( id, part_of_speech, definition, frames, scenarios, usage_choices, frame_choices )
   )
 `;
 
@@ -55,13 +59,20 @@ Deno.serve(
         return { ...card, sense } satisfies CardToGrade;
       },
       verdict: (sense, task, answer, sentence) => generateVerdict(anthropic, model, sense, task, answer, sentence),
+      secondLook: (sense, task, answer, sentence) =>
+        generateSecondOpinion(anthropic, checkModel, sense, task, answer, sentence, 'check'),
       async record(card, newCard, attempt) {
         const { data, error } = await ctx.supabaseAdmin.rpc('record_attempt', {
           p_user_id: userId,
           p_card_id: card.id,
           p_expected_reps: card.reps,
           p_card: newCard,
-          p_attempt: { ...attempt, surface: 'badge', model, prompt_version: PROMPT_VERSION },
+          p_attempt: {
+            ...attempt,
+            surface: 'badge',
+            model: attempt.second_look ? checkModel : model,
+            prompt_version: PROMPT_VERSION,
+          },
         });
         if (error) throw new Error(error.message);
         return (data as string | null) ?? null;

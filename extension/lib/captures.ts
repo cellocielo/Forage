@@ -11,6 +11,8 @@ export const DOUBLE_SAVE_WINDOW_MS = 10 * 60 * 1000;
 export interface CaptureInput {
   word: string;
   sentence?: string | null;
+  /** The sentence before, kept as context for the meaning. */
+  previousSentence?: string | null;
   pageTitle?: string | null;
   sourceUrl?: string | null;
   // Pass the same id when retrying so the upsert stays idempotent (PRD C3).
@@ -77,6 +79,8 @@ export async function saveWord(
       client_capture_id: clientCaptureId,
       word,
       sentence,
+      // Only worth keeping alongside a sentence.
+      previous_sentence: sentence ? clip(input.previousSentence, MAX_SENTENCE) : null,
       page_title: clip(input.pageTitle, MAX_PAGE_TITLE),
       source_url: sourceUrl,
       source: input.source ?? 'extension',

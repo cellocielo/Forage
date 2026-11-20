@@ -14,6 +14,7 @@ import {
   GradeRequestSchema,
   GradingRefusedError,
   generateVerdict,
+  needsSecondLook,
   type PracticeSense,
   taskFor,
   type Verdict,
@@ -31,11 +32,13 @@ const SENSE: PracticeSense = {
     { register: 'formal', situation: 'Email the league office about a bad call.' },
     { register: 'informal', situation: 'Text your roommate about the repair bill.' },
   ],
-  usage_choice: {
-    correct: 'The referee made an egregious error.',
-    incorrect: 'She gave an egregious speech that everyone loved.',
-    mistake: '"Egregious" means shockingly bad, so it cannot praise a speech.',
-  },
+  usage_choices: [
+    {
+      correct: 'The referee made an egregious error.',
+      incorrect: 'She gave an egregious speech that everyone loved.',
+      mistake: '"Egregious" means shockingly bad, so it cannot praise a speech.',
+    },
+  ],
   frame_choices: [
     { answer: 'the crowd booed', wrong: ['everyone cheered', 'the fans thanked him'], why: 'Egregious means shockingly bad.' },
     null,
@@ -64,6 +67,7 @@ const VERDICT: Verdict = {
   corrected_sentence: "The judge's ruling was so egregious that the crowd booed.",
   rationale: 'You show the ruling was shockingly bad by the crowd reacting to it.',
   score: 4,
+  unsure: false,
 };
 
 const REQUEST: GradeRequest = {
@@ -94,6 +98,59 @@ function fakeDeps(overrides: Partial<GradeDeps> = {}) {
   };
   return { deps, recorded, verdicts };
 }
+
+Deno.test('needsSecondLook flags low and unsure grades only', () => {
+  assertEquals(needsSecondLook(VERDICT), false);
+  assertEquals(needsSecondLook({ ...VERDICT, score: 3 }), false);
+  assertEquals(needsSecondLook({ ...VERDICT, score: 2 }), true);
+  assertEquals(needsSecondLook({ ...VERDICT, score: 1 }), true);
+  assertEquals(needsSecondLook({ ...VERDICT, unsure: true }), true);
+});
+
+Deno.test('gradeAttempt has a low grade checked by the stronger model before showing it', async () => {
+  const checked = { ...VERDICT, score: 3, rationale: 'Checked.' };
+  const looks: unknown[] = [];
+  const { deps, recorded } = fakeDeps({
+    verdict: () => Promise.resolve({ ...VERDICT, score: 1 }),
+    secondLook: (...args) => {
+      looks.push(args);
+      return Promise.resolve(checked);
+    },
+  });
+
+  const outcome = await gradeAttempt(REQUEST, deps);
+
+  assertEquals(looks.length, 1);
+  assertEquals(outcome.ok && outcome.verdict, checked);
+  assertEquals(recorded[0]![2].second_look, true);
+  assertEquals(recorded[0]![2].score, 3);
+});
+
+Deno.test('gradeAttempt skips the second look for a confident good grade and for multiple choice', async () => {
+  let looked = false;
+  const secondLook = () => {
+    looked = true;
+    return Promise.resolve(VERDICT);
+  };
+  const { deps, recorded } = fakeDeps({ secondLook });
+  await gradeAttempt(REQUEST, deps);
+  // A wrong multiple-choice pick is checked against its answer key, not graded by a model.
+  await gradeAttempt({ ...REQUEST, task_type: 'choice', answer: SENSE.usage_choices![0]!.incorrect }, deps);
+  assertEquals(looked, false);
+  assertEquals(recorded[0]![2].second_look, false);
+  assertEquals(recorded[1]![2].score, 1);
+});
+
+Deno.test('gradeAttempt keeps the first grade when the second look fails', async () => {
+  const low = { ...VERDICT, score: 2 };
+  const { deps, recorded } = fakeDeps({
+    verdict: () => Promise.resolve(low),
+    secondLook: () => Promise.reject(new Error('overloaded')),
+  });
+  const outcome = await gradeAttempt(REQUEST, deps);
+  assertEquals(outcome.ok && outcome.verdict, low);
+  assertEquals(recorded[0]![2].second_look, false);
+});
 
 Deno.test('fillFrame puts the answer in an ending blank and keeps its punctuation once', () => {
   assertEquals(
@@ -231,23 +288,26 @@ Deno.test('generateVerdict handles refusals, truncation, schema misses, and bad 
 
 Deno.test('taskFor offers a choice task only when the sense has a usage pair', () => {
   assertEquals(taskFor(SENSE, 'choice', 0), { type: 'choice', prompt: 'Which sentence uses "egregious" correctly?' });
-  assertEquals(taskFor({ ...SENSE, usage_choice: null }, 'choice', 0), null);
+  assertEquals(taskFor({ ...SENSE, usage_choices: [null] }, 'choice', 0), null);
+  assertEquals(taskFor(SENSE, 'choice', 1), null);
+  const second = { correct: 'The fee was egregious.', incorrect: 'The egregious gift made her smile.', mistake: 'Egregious is bad.' };
+  assertEquals(taskFor({ ...SENSE, usage_choices: [null, second] }, 'choice', 1)?.type, 'choice');
   assertEquals(taskFor(SENSE, 'choice', 1), null);
 });
 
 Deno.test('choiceVerdict scores the correct pick Good and the other Again, explaining the mistake', () => {
-  const right = choiceVerdict(SENSE.usage_choice!, SENSE.usage_choice!.correct)!;
-  assertEquals([right.score, right.sense, right.rationale], [3, 'correct', SENSE.usage_choice!.mistake]);
-  const wrong = choiceVerdict(SENSE.usage_choice!, SENSE.usage_choice!.incorrect)!;
-  assertEquals([wrong.score, wrong.sense, wrong.corrected_sentence], [1, 'wrong', SENSE.usage_choice!.correct]);
-  assertEquals(choiceVerdict(SENSE.usage_choice!, 'Something else.'), null);
+  const right = choiceVerdict(SENSE.usage_choices![0]!, SENSE.usage_choices![0]!.correct)!;
+  assertEquals([right.score, right.sense, right.rationale], [3, 'correct', SENSE.usage_choices![0]!.mistake]);
+  const wrong = choiceVerdict(SENSE.usage_choices![0]!, SENSE.usage_choices![0]!.incorrect)!;
+  assertEquals([wrong.score, wrong.sense, wrong.corrected_sentence], [1, 'wrong', SENSE.usage_choices![0]!.correct]);
+  assertEquals(choiceVerdict(SENSE.usage_choices![0]!, 'Something else.'), null);
 });
 
 Deno.test('gradeAttempt grades a choice without calling the model and ignores hints', async () => {
   const { deps, verdicts, recorded } = fakeDeps();
 
   const outcome = await gradeAttempt(
-    { ...REQUEST, task_type: 'choice', answer: SENSE.usage_choice!.correct, hints_used: 3 },
+    { ...REQUEST, task_type: 'choice', answer: SENSE.usage_choices![0]!.correct, hints_used: 3 },
     deps,
   );
 
@@ -255,7 +315,7 @@ Deno.test('gradeAttempt grades a choice without calling the model and ignores hi
   assertEquals(outcome.rating, Rating.Good);
   assertEquals(verdicts.length, 0);
   assertEquals(recorded[0]![2].hints_used, 0);
-  assertEquals(recorded[0]![2].sentence, SENSE.usage_choice!.correct);
+  assertEquals(recorded[0]![2].sentence, SENSE.usage_choices![0]!.correct);
 });
 
 Deno.test('gradeAttempt rejects a choice that is neither sentence', async () => {
@@ -293,7 +353,11 @@ Deno.test('generateSecondOpinion uses the beta API with default fallbacks and a 
   assertEquals(calls[0].fallbacks, 'default');
   assertEquals(calls[0].betas, ['server-side-fallback-2026-07-01']);
   assertEquals(calls[0].output_config.effort, 'medium');
-  assertStringIncludes(calls[0].system, 'second opinion');
+  assertStringIncludes(calls[0].system, 'the learner disagreed');
+
+  await generateSecondOpinion(client, 'claude-opus-5-5', SENSE, taskFor(SENSE, 'open', 0)!, 'x', 'x', 'check');
+  assertEquals(calls[1].output_config.effort, 'low');
+  assertStringIncludes(calls[1].system, 'before the learner sees a grade');
 });
 
 Deno.test('taskFor offers a pick only for frames that have a choice', () => {

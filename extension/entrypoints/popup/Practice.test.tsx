@@ -7,6 +7,7 @@ import { Practice } from './Practice';
 const mocks = vi.hoisted(() => ({
   fetchNextCard: vi.fn(),
   fetchExtraCard: vi.fn(),
+  fetchNextPractice: vi.fn(),
   submitAttempt: vi.fn(),
   disputeAttempt: vi.fn(),
   refreshBadge: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock('@/lib/practice', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/practice')>()),
   fetchNextCard: mocks.fetchNextCard,
   fetchExtraCard: mocks.fetchExtraCard,
+  fetchNextPractice: mocks.fetchNextPractice,
   submitAttempt: mocks.submitAttempt,
   disputeAttempt: mocks.disputeAttempt,
 }));
@@ -30,7 +32,8 @@ const CARD: PracticeCard = {
   partOfSpeech: 'adjective',
   frames: ["The judge's ruling was so egregious that ___."],
   scenarios: [{ register: 'formal', situation: 'Email the league office.' }],
-  usageChoice: null,
+  usageChoices: [],
+  recent: [],
   frameChoices: [],
   hints: { partners: ['an egregious error'], example: 'The printer jam was egregious.', starter: 'The call was' },
   definition: 'shockingly bad',
@@ -60,6 +63,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.fetchNextCard.mockResolvedValue(CARD);
   mocks.fetchExtraCard.mockResolvedValue(null);
+  mocks.fetchNextPractice.mockResolvedValue(null);
   mocks.submitAttempt.mockResolvedValue({ ok: true, result: RESULT });
 });
 afterEach(cleanup);
@@ -93,9 +97,10 @@ describe('Practice', () => {
   });
 
   it('reveals hints one at a time, says which ones cap the score, and reports how many were used', async () => {
+    mocks.fetchNextCard.mockResolvedValue({ ...CARD, state: 2, stability: 10 });
     const user = userEvent.setup();
     render(<Practice />);
-    await screen.findByLabelText('Fill in the blank');
+    await screen.findByText('Email the league office.');
 
     await user.click(screen.getByRole('button', { name: 'Stuck?' }));
     expect(screen.getByText('an egregious error')).toBeTruthy();
@@ -106,9 +111,20 @@ describe('Practice', () => {
     expect(screen.getByText('The call was…')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /hint/i })).toBeNull();
 
-    await user.type(screen.getByLabelText('Fill in the blank'), 'x');
+    await user.type(screen.getByLabelText('Your sentence, using "egregious"'), 'x');
     await user.click(screen.getByRole('button', { name: 'Check' }));
     expect(mocks.submitAttempt.mock.calls[0]![4]).toBe(3);
+  });
+
+  it("doesn't offer a sentence starter on a fill-in-the-blank, which already has one", async () => {
+    const user = userEvent.setup();
+    render(<Practice />);
+    await screen.findByLabelText('Fill in the blank');
+
+    await user.click(screen.getByRole('button', { name: 'Stuck?' }));
+    await user.click(screen.getByRole('button', { name: 'Another hint (max Solid)' }));
+    expect(screen.queryByText('Start with')).toBeNull();
+    expect(screen.queryByRole('button', { name: /hint/i })).toBeNull();
   });
 
   it('uses a sentence box for scenarios', async () => {
@@ -192,6 +208,39 @@ describe('Practice', () => {
     expect(screen.queryByRole('button', { name: 'Keep practicing' })).toBeNull();
   });
 
+  it('says roughly when the next word is due', async () => {
+    mocks.fetchNextCard.mockResolvedValue(null);
+    mocks.fetchNextPractice.mockResolvedValue({ kind: 'due', at: new Date(Date.now() + 3 * 60 * 60 * 1000) });
+    render(<Practice />);
+
+    expect(await screen.findByText('Next word due in about 3 hours.')).toBeTruthy();
+  });
+
+  it("mentions the reminder when one will come", async () => {
+    mocks.fetchNextCard.mockResolvedValue(null);
+    mocks.fetchNextPractice.mockResolvedValue({ kind: 'due', at: new Date(Date.now() + 3 * 60 * 60 * 1000) });
+    render(<Practice remindsWhenReady />);
+
+    expect(await screen.findByText("Next word due in about 3 hours. We'll remind you when it's ready.")).toBeTruthy();
+  });
+
+  it("says when today's limit is used up", async () => {
+    mocks.fetchNextCard.mockResolvedValue(null);
+    mocks.fetchNextPractice.mockResolvedValue({ kind: 'cap' });
+    render(<Practice dailyCap={5} />);
+
+    expect(await screen.findByText("You've done today's 5 words. More tomorrow.")).toBeTruthy();
+  });
+
+  it('still shows the caught-up screen if the next due time fails to load', async () => {
+    mocks.fetchNextCard.mockResolvedValue(null);
+    mocks.fetchNextPractice.mockRejectedValue(new Error('offline'));
+    render(<Practice />);
+
+    expect(await screen.findByText('All caught up')).toBeTruthy();
+    expect(screen.queryByText(/Next word due/)).toBeNull();
+  });
+
   it('says when nothing is ready, and offers a retry when loading fails', async () => {
     mocks.fetchNextCard.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(null);
     render(<Practice />);
@@ -210,7 +259,7 @@ const CHOICE = {
 
 describe('Practice: choice, easier, disputes', () => {
   it('grades a usage choice with one click and shows the correct usage', async () => {
-    mocks.fetchNextCard.mockResolvedValue({ ...CARD, usageChoice: CHOICE, reps: 0, state: 2, stability: 2 });
+    mocks.fetchNextCard.mockResolvedValue({ ...CARD, usageChoices: [CHOICE], reps: 0, state: 2, stability: 2 });
     mocks.submitAttempt.mockResolvedValue({
       ok: true,
       result: {
@@ -236,14 +285,14 @@ describe('Practice: choice, easier, disputes', () => {
       ok: true,
       result: { verdict: RESULT.verdict, score: 3, rating: 3, changed: true, rescheduled: true, due: RESULT.due, scheduled_days: 3 },
     });
-    await user.click(screen.getByRole('button', { name: 'I disagree' }));
+    await user.click(screen.getByRole('button', { name: 'Think this question is wrong?' }));
     expect(await screen.findByText('Second opinion: Right')).toBeTruthy();
     expect(screen.getByText(/this question won't be used again/)).toBeTruthy();
   });
 
   it('starts a new word on picking the ending that fits, and can drop to a usage choice', async () => {
     const pick = { answer: 'the crowd booed', wrong: ['everyone cheered', 'he got a prize'] as [string, string], why: 'Shockingly bad.' };
-    mocks.fetchNextCard.mockResolvedValue({ ...CARD, frameChoices: [pick], usageChoice: CHOICE });
+    mocks.fetchNextCard.mockResolvedValue({ ...CARD, frameChoices: [pick], usageChoices: [CHOICE] });
     const user = userEvent.setup();
     render(<Practice />);
 
@@ -254,7 +303,7 @@ describe('Practice: choice, easier, disputes', () => {
     expect(mocks.submitAttempt.mock.calls[0]![2]).toMatchObject({ type: 'pick', index: 0 });
     expect(mocks.submitAttempt.mock.calls[0]![3]).toBe('everyone cheered');
     expect(await screen.findByRole('button', { name: 'Next word' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'I disagree' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /wrong\?$/ })).toBeNull();
   });
 
   it('drops to an easier task and reports that it did', async () => {
@@ -293,13 +342,13 @@ describe('Practice: choice, easier, disputes', () => {
     render(<Practice />);
     await user.type(await screen.findByLabelText('Fill in the blank'), 'x{Enter}');
 
-    await user.click(await screen.findByRole('button', { name: 'I disagree' }));
+    await user.click(await screen.findByRole('button', { name: 'Think this grade is wrong?' }));
 
     expect(mocks.disputeAttempt).toHaveBeenCalledWith({}, 'a1');
     expect(await screen.findByText('Second opinion: Mastered')).toBeTruthy();
     expect(screen.getByText(/Your next review is now in 2 weeks/)).toBeTruthy();
     expect(screen.getByText('Natural and precise.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'I disagree' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /wrong\?$/ })).toBeNull();
   });
 
   it('says when the second opinion agrees, and lets you retry after an error', async () => {
@@ -313,9 +362,9 @@ describe('Practice: choice, easier, disputes', () => {
     render(<Practice />);
     await user.type(await screen.findByLabelText('Fill in the blank'), 'x{Enter}');
 
-    await user.click(await screen.findByRole('button', { name: 'I disagree' }));
+    await user.click(await screen.findByRole('button', { name: 'Think this grade is wrong?' }));
     expect(await screen.findByRole('alert')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'I disagree' }));
+    await user.click(screen.getByRole('button', { name: /wrong\?$/ }));
 
     expect(await screen.findByText(/It agrees with the first grade/)).toBeTruthy();
   });

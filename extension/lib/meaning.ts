@@ -1,13 +1,14 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 /**
- * Meaning on save: once a new word is enriched (a few seconds after saving), the page shows
+ * Meaning on save: once a new word's meaning is written (a couple of seconds after saving), the page shows
  * what it means in that sentence plus its other common meanings. No browser APIs here, so the
  * web app shares it; the extension's messaging is in meaning-messages.ts.
  */
 
-const POLL_INTERVAL_MS = 1500;
-// Enrichment starts as soon as the word is saved and usually takes 5 to 15 seconds.
+// The meaning is written first and usually ready 2 to 4 seconds after saving.
+const POLL_INTERVAL_MS = 1000;
+// Generous for a slow model response or a retry.
 const POLL_TIMEOUT_MS = 45_000;
 // Mirrors MAX_ATTEMPTS in the enrich-captures function.
 const MAX_ENRICHMENT_ATTEMPTS = 3;

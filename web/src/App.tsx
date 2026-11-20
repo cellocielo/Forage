@@ -4,6 +4,7 @@ import { Acorn } from '@/components/Acorn';
 import { SignInForm } from '@/entrypoints/popup/App';
 import { Practice } from '@/entrypoints/popup/Practice';
 import { Onboarding, Settings } from '@/entrypoints/popup/Settings';
+import { Words } from '@/entrypoints/popup/Words';
 import { loadSettings, type Settings as SettingsValue } from '@/lib/settings';
 import { supabase } from '@/lib/supabase';
 import { refreshBadge } from './badge';
@@ -12,9 +13,9 @@ import { respondToReminder, turnOffPush } from './push';
 import { Save, useClearShareParams } from './Save';
 import { readShare, type Shared } from './share';
 
-type Tab = 'practice' | 'save' | 'settings';
+type Tab = 'practice' | 'words' | 'save' | 'settings';
 
-/** Forage on a phone or in any browser: practice, save words, settings. */
+/** Forage on a phone or in any browser: practice, saved words, save words, settings. */
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   // Read once: text shared to the app opens the Save tab with it.
@@ -89,6 +90,7 @@ function SignedIn({ email, shared, fromReminder }: { email?: string; shared: Sha
   } else if (view.kind === 'onboarding') {
     body = <Onboarding onDone={(settings) => setView({ kind: 'ready', settings })} />;
   } else if (tab === 'practice') body = <Practice dailyCap={view.settings.dailyCap} />;
+  else if (tab === 'words') body = <Words />;
   else if (tab === 'save') body = <Save shared={shared} />;
   else {
     body = (
@@ -123,6 +125,7 @@ function SignedIn({ email, shared, fromReminder }: { email?: string; shared: Sha
           {(
             [
               ['practice', 'Practice'],
+              ['words', 'Words'],
               ['save', 'Save a word'],
               ['settings', 'Settings'],
             ] as const
