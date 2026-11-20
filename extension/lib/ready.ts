@@ -24,7 +24,9 @@ export async function countReadyWords(
   const [due, reviewedToday] = await Promise.all([
     client
       .from('cards')
-      .select('id', { count: 'exact', head: true })
+      // Practice skips a word until its practice material is written, seconds after saving.
+      .select('id, captures!inner ( senses!inner ( practice_ready ) )', { count: 'exact', head: true })
+      .eq('captures.senses.practice_ready', true)
       .is('archived_at', null)
       .lte('due', nowIso)
       .or(`snoozed_until.is.null,snoozed_until.lte."${nowIso}"`),

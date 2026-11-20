@@ -7,6 +7,8 @@ export const QUEUE_KEY = 'forage:capture-queue';
 export interface QueuedCapture {
   word: string;
   sentence: string | null;
+  /** Missing on captures queued before it was saved. */
+  previousSentence?: string | null;
   pageTitle: string | null;
   sourceUrl: string | null;
   clientCaptureId: string;
@@ -46,6 +48,7 @@ export async function captureWord(client: SupabaseClient, input: CaptureInput): 
   const queued: QueuedCapture = {
     word: input.word,
     sentence: input.sentence ?? null,
+    previousSentence: input.previousSentence ?? null,
     pageTitle: input.pageTitle ?? null,
     sourceUrl: input.sourceUrl ?? null,
     clientCaptureId,

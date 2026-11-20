@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { Acorn } from '@/components/Acorn';
-import { loadSettings, type Settings as SettingsValue } from '@/lib/settings';
+import { loadSettings, practiceOffReason, type Settings as SettingsValue } from '@/lib/settings';
 import { supabase } from '@/lib/supabase';
 import { Practice } from './Practice';
 import { Onboarding, Settings } from './Settings';
+import { Words } from './Words';
 
 function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -23,7 +24,7 @@ type SignedInView =
   | { kind: 'loading' }
   | { kind: 'error' }
   | { kind: 'onboarding' }
-  | { kind: 'practice' | 'settings'; settings: SettingsValue };
+  | { kind: 'practice' | 'settings' | 'words'; settings: SettingsValue };
 
 function SignedIn({ email }: { email?: string }) {
   const [view, setView] = useState<SignedInView>({ kind: 'loading' });
@@ -61,7 +62,15 @@ function SignedIn({ email }: { email?: string }) {
       body = <Onboarding onDone={(settings) => setView({ kind: 'practice', settings })} />;
       break;
     case 'practice':
-      body = <Practice dailyCap={view.settings.dailyCap} />;
+      body = (
+        <Practice
+          dailyCap={view.settings.dailyCap}
+          remindsWhenReady={view.settings.cornerReminderEnabled && !practiceOffReason(view.settings)}
+        />
+      );
+      break;
+    case 'words':
+      body = <Words onClose={() => setView({ kind: 'practice', settings: view.settings })} />;
       break;
     case 'settings':
       body = (
@@ -86,9 +95,14 @@ function SignedIn({ email }: { email?: string }) {
           Signed in as <strong>{email}</strong>
         </span>
         {view.kind === 'practice' && (
-          <button type="button" className="link" onClick={() => setView({ kind: 'settings', settings: view.settings })}>
-            Settings
-          </button>
+          <>
+            <button type="button" className="link" onClick={() => setView({ kind: 'words', settings: view.settings })}>
+              Words
+            </button>
+            <button type="button" className="link" onClick={() => setView({ kind: 'settings', settings: view.settings })}>
+              Settings
+            </button>
+          </>
         )}
         <button type="button" className="link" onClick={() => supabase.auth.signOut()}>
           Sign out

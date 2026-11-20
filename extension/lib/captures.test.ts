@@ -53,6 +53,7 @@ describe('saveWord', () => {
     const result = await saveWord(client, {
       word: '  ephemeral ',
       sentence: 'Fame is   ephemeral.',
+      previousSentence: ' She went viral once. ',
       pageTitle: 'An essay',
       sourceUrl: 'https://example.com/essay',
       clientCaptureId: 'cap-1',
@@ -67,6 +68,7 @@ describe('saveWord', () => {
         client_capture_id: 'cap-1',
         word: 'ephemeral',
         sentence: 'Fame is ephemeral.',
+        previous_sentence: 'She went viral once.',
         page_title: 'An essay',
         source_url: 'https://example.com/essay',
         source: 'extension',
@@ -74,6 +76,12 @@ describe('saveWord', () => {
       },
       { onConflict: 'user_id,client_capture_id', ignoreDuplicates: true },
     );
+  });
+
+  it('drops the previous sentence when there is no sentence', async () => {
+    const { client, upsert } = fakeClient();
+    await saveWord(client, { word: 'laconic', previousSentence: 'Earlier.' });
+    expect(upsert.mock.calls[0]![0].previous_sentence).toBeNull();
   });
 
   it('generates a client_capture_id when none is given', async () => {

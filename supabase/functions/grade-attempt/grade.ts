@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { type CardRow, type HintsUsed, reviewCard, type ReviewLogRow, type Score, scoreToRating } from '../_shared/scheduling.ts';
 
 // Bump when the prompt or schema changes, and rerun the regression set first (PRD G2, G5).
-export const PROMPT_VERSION = 'grade-v2';
+export const PROMPT_VERSION = 'grade-v3';
 // Cheap model by default; disputes get a second opinion from a frontier model (G3, G6).
 export const DEFAULT_MODEL = 'claude-haiku-5-5';
 export const DISPUTE_MODEL = 'claude-opus-5-5';
@@ -22,7 +22,7 @@ export const MAX_ANSWER = 500;
 export const GradeRequestSchema = z.object({
   card_id: z.string().uuid(),
   task_type: z.enum(TASK_TYPES),
-  prompt_index: z.number().int().min(0).max(2),
+  prompt_index: z.number().int().min(0).max(7),
   answer: z.string().trim().min(1).max(MAX_ANSWER),
   hints_used: z.number().int().min(0).max(3),
   easier: z.boolean().default(false),
@@ -51,6 +51,9 @@ export const VerdictSchema = z.object({
     'One short sentence to the learner ("you") naming the single most important thing about their sentence.',
   ),
   score: z.number().int().describe('1 to 4, from the rubric.'),
+  unsure: z.boolean().describe(
+    'True if a careful editor could reasonably grade this sentence differently: an unusual but possible use, an idiom or regional usage you are not sure of, or a sentence that is hard to read either way.',
+  ),
 });
 export type Verdict = z.infer<typeof VerdictSchema>;
 
@@ -91,7 +94,8 @@ export interface PracticeSense {
   definition: string;
   frames: string[] | null;
   scenarios: Array<{ register: string; situation: string }> | null;
-  usage_choice?: UsageChoice | null;
+  /** Indexed as the client shows them; a retired pair is null. */
+  usage_choices?: Array<UsageChoice | null> | null;
   frame_choices?: Array<FrameChoice | null> | null;
 }
 
@@ -109,7 +113,7 @@ export function choicePrompt(lemma: string): string {
 /** The task the learner saw, rebuilt from the sense so the client can't grade against its own prompt. */
 export function taskFor(sense: PracticeSense, type: TaskType, index: number): Task | null {
   if (type === 'choice') {
-    return sense.usage_choice && index === 0 ? { type, prompt: choicePrompt(sense.lemma) } : null;
+    return sense.usage_choices?.[index] ? { type, prompt: choicePrompt(sense.lemma) } : null;
   }
   if (type === 'frame' || type === 'pick') {
     const frame = sense.frames?.[index];
@@ -184,13 +188,30 @@ export async function generateVerdict(
   return checkedVerdict(response);
 }
 
-const SECOND_OPINION_NOTE = `
+const SECOND_OPINION_NOTES = {
+  dispute: `
 
-This is a second opinion: the learner disagreed with an earlier grade. Grade the sentence fresh against the rubric. You are not told the earlier grade, so neither defer to it nor overturn it on purpose.`;
+This is a second opinion: the learner disagreed with an earlier grade. Grade the sentence fresh against the rubric. You are not told the earlier grade, so neither defer to it nor overturn it on purpose.`,
+  check: `
+
+This is a second look before the learner sees a grade: a first grader scored the sentence low or wasn't sure. Grade the sentence fresh against the rubric. You are not told the earlier grade, so neither defer to it nor overturn it on purpose.`,
+};
+
+/**
+ * A typed answer worth a stronger model's look before the learner sees the grade: a low score
+ * (the grades learners dispute) or one the first grader wasn't sure of. Catching wrong grades
+ * here means learners rarely have to question one themselves.
+ */
+export function needsSecondLook(verdict: Verdict): boolean {
+  return verdict.score <= 2 || verdict.unsure;
+}
 
 type BetaMessagesClient = { beta: Pick<Anthropic['beta'], 'messages'> };
 
-/** G3: the same rubric on a frontier model, for a grade the learner disputed. */
+/**
+ * G3, G6: the same rubric on a frontier model, for a grade the learner disputed, or (purpose
+ * "check") for a low or unsure grade before it's shown, at lower effort since the learner waits.
+ */
 export async function generateSecondOpinion(
   client: BetaMessagesClient,
   model: string,
@@ -198,15 +219,16 @@ export async function generateSecondOpinion(
   task: Task,
   answer: string,
   sentence: string,
+  purpose: 'dispute' | 'check' = 'dispute',
 ): Promise<Verdict> {
   const response = await client.beta.messages.parse({
     model,
     max_tokens: 8000,
-    output_config: { effort: 'medium', format: betaZodOutputFormat(VerdictSchema) },
+    output_config: { effort: purpose === 'check' ? 'low' : 'medium', format: betaZodOutputFormat(VerdictSchema) },
     // If the model declines on policy grounds, the API retries on its default fallback model.
     betas: ['server-side-fallback-2026-07-01'],
     fallbacks: 'default',
-    system: SYSTEM_PROMPT + SECOND_OPINION_NOTE,
+    system: SYSTEM_PROMPT + SECOND_OPINION_NOTES[purpose],
     messages: [{ role: 'user', content: buildUserMessage(sense, task, answer, sentence) }],
   });
   return checkedVerdict(response);
@@ -279,6 +301,7 @@ export function choiceVerdict(choice: UsageChoice, picked: string): Verdict | nu
     corrected_sentence: choice.correct,
     rationale: choice.mistake,
     score: isCorrect ? 3 : 1,
+    unsure: false,
   };
 }
 
@@ -297,6 +320,7 @@ export function pickVerdict(frame: string, choice: FrameChoice, picked: string):
     corrected_sentence: fillFrame(frame, choice.answer),
     rationale: choice.why,
     score: isCorrect ? 3 : 1,
+    unsure: false,
   };
 }
 
@@ -315,6 +339,8 @@ export interface CardToGrade extends CardRow {
 export interface GradeDeps {
   loadCard(cardId: string): Promise<CardToGrade | null>;
   verdict(sense: PracticeSense, task: Task, answer: string, sentence: string): Promise<Verdict>;
+  /** A stronger model's grade, for a typed answer the first grader scored low or wasn't sure of. */
+  secondLook?(sense: PracticeSense, task: Task, answer: string, sentence: string): Promise<Verdict>;
   /** Returns the new attempt's id, or null if the card changed since it was loaded. */
   record(card: CardToGrade, newCard: CardRow, attempt: AttemptToRecord): Promise<string | null>;
   now(): Date;
@@ -329,6 +355,8 @@ export interface AttemptToRecord {
   hints_used: HintsUsed;
   easier: boolean;
   verdict: Verdict;
+  /** The verdict came from the second look, not the first grader. */
+  second_look: boolean;
   score: Score;
   rating: number;
   review: ReviewLogRow;
@@ -361,14 +389,24 @@ export async function gradeAttempt(request: GradeRequest, deps: GradeDeps): Prom
   const answer = request.answer.trim();
   const sentence = task.type === 'frame' || task.type === 'pick' ? fillFrame(task.prompt, answer) : answer;
   let verdict: Verdict;
+  let secondLook = false;
   if (isAutoChecked(task.type)) {
     const picked = task.type === 'choice'
-      ? choiceVerdict(card.sense.usage_choice!, answer)
+      ? choiceVerdict(card.sense.usage_choices![request.prompt_index]!, answer)
       : pickVerdict(task.prompt, card.sense.frame_choices![request.prompt_index]!, answer);
     if (!picked) return { ok: false, status: 400, error: 'Unknown choice for this word' };
     verdict = picked;
   } else {
     verdict = await deps.verdict(card.sense, task, answer, sentence);
+    if (deps.secondLook && needsSecondLook(verdict)) {
+      try {
+        verdict = await deps.secondLook(card.sense, task, answer, sentence);
+        secondLook = true;
+      } catch (error) {
+        // The first grade stands; the learner can still ask for a second opinion.
+        console.warn('grade: second look failed', error instanceof Error ? error.message : error);
+      }
+    }
   }
   const score = verdict.score as Score;
   // Choice and pick tasks have no hint ladder.
@@ -385,6 +423,7 @@ export async function gradeAttempt(request: GradeRequest, deps: GradeDeps): Prom
     hints_used: hintsUsed,
     easier: request.easier,
     verdict,
+    second_look: secondLook,
     score,
     rating,
     review: log,

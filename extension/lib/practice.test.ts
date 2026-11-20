@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { FunctionsFetchError, FunctionsHttpError, type SupabaseClient } from '@supabase/supabase-js';
 import {
+  choiceStreak,
   chooseTask,
   describeNextReview,
   disputeAttempt,
@@ -8,8 +9,11 @@ import {
   fetchExtraCard,
   fetchNextCard,
   hintSteps,
+  isAutoChecked,
   submitAttempt,
   type PracticeCard,
+  type RecentAttempt,
+  type Task,
 } from './practice';
 
 const CARD: PracticeCard = {
@@ -25,7 +29,8 @@ const CARD: PracticeCard = {
     { register: 'neutral', situation: 'Tell a friend.' },
     { register: 'informal', situation: 'Text your roommate.' },
   ],
-  usageChoice: null,
+  usageChoices: [],
+  recent: [],
   frameChoices: [],
   hints: { partners: ['an egregious error', 'egregious behavior'], example: 'It was egregious.', starter: 'The call was' },
   definition: 'shockingly bad',
@@ -40,6 +45,23 @@ const CHOICE = {
 };
 
 const PICK = { answer: 'I complained', wrong: ['I cheered', 'I said thanks'] as [string, string], why: 'Bad things get complaints.' };
+
+/** Reviews a card n times, recording each task as an attempt with the given rating. */
+function practiceRun(card: PracticeCard, n: number, rating: (task: Task) => number): Task[] {
+  const tasks: Task[] = [];
+  let current = card;
+  for (let i = 0; i < n; i++) {
+    const task = chooseTask(current);
+    tasks.push(task);
+    const answer = task.type === 'choice' ? task.options![0]! : 'answer';
+    current = {
+      ...current,
+      reps: current.reps + 1,
+      recent: [{ type: task.type, prompt: task.prompt, answer, rating: rating(task) }, ...current.recent],
+    };
+  }
+  return tasks;
+}
 
 describe('chooseTask', () => {
   it('gives new and weak words a frame, rotating with each review', () => {
@@ -70,29 +92,62 @@ describe('chooseTask', () => {
   });
 
   it('starts new words on picking an ending, then rotates through a usage choice and typing', () => {
-    const card = { ...CARD, usageChoice: CHOICE, frameChoices: [PICK, null] };
-    const tasks = [0, 1, 2, 3].map((reps) => chooseTask({ ...card, state: reps ? 2 : 0, stability: 2, reps }));
-    expect(tasks.map((t) => [t.type, t.index])).toEqual([
-      ['pick', 0],
-      ['choice', 0],
-      ['frame', 0],
-      ['pick', 0],
-    ]);
+    const card = { ...CARD, usageChoices: [CHOICE], frameChoices: [PICK, null], state: 2, stability: 2 };
+    const tasks = practiceRun({ ...card, state: 0 }, 4, () => 1);
+    expect(tasks.map((t) => t.type)).toEqual(['pick', 'choice', 'frame', 'pick']);
     expect([...tasks[0]!.options!].sort()).toEqual(['I cheered', 'I complained', 'I said thanks']);
     expect(tasks[0]!.prompt).toBe(CARD.frames[0]);
   });
 
   it('skips tasks the word lacks in the rotation', () => {
-    const tasks = [0, 1].map((reps) => chooseTask({ ...CARD, frameChoices: [null, PICK], reps, state: 2, stability: 2 }));
+    const tasks = practiceRun({ ...CARD, frameChoices: [null, PICK], state: 2, stability: 2 }, 2, () => 1);
     expect(tasks.map((t) => [t.type, t.index])).toEqual([
       ['pick', 1],
-      ['frame', 1],
+      ['frame', 0],
     ]);
+  });
+
+  it('shows the question seen longest ago, and never types the frame just picked', () => {
+    const pairs = [CHOICE, { ...CHOICE, correct: 'A second right one.', incorrect: 'A second wrong one.' }, null];
+    const card = { ...CARD, usageChoices: pairs, frameChoices: [PICK, PICK], state: 2, stability: 2 };
+    const tasks = practiceRun(card, 6, () => 1);
+
+    const choices = tasks.filter((t) => t.type === 'choice').map((t) => t.index);
+    expect([...choices].sort()).toEqual([0, 1]);
+    // pick, choice, frame, pick, choice, frame: each frame is typed on a different sentence than was just picked.
+    const frameIndexes = tasks.map((t) => (t.type === 'pick' || t.type === 'frame' ? t.index : null));
+    expect(frameIndexes[0]).not.toBe(frameIndexes[2]);
+    expect(frameIndexes[3]).not.toBe(frameIndexes[5]);
+  });
+
+  it('moves a weak word past multiple choice after two right answers in a row', () => {
+    const card = { ...CARD, usageChoices: [CHOICE], frameChoices: [PICK, PICK], state: 2, stability: 2 };
+    const tasks = practiceRun(card, 5, () => 3);
+    expect(tasks.map((t) => t.type)).toEqual(['pick', 'choice', 'frame', 'frame', 'frame']);
+  });
+
+  it('brings multiple choice back after a missed typed answer', () => {
+    const recent: RecentAttempt[] = [
+      { type: 'frame', prompt: CARD.frames[0]!, answer: 'x', rating: 1 },
+      { type: 'choice', prompt: '', answer: CHOICE.correct, rating: 3 },
+      { type: 'pick', prompt: CARD.frames[1]!, answer: 'I complained', rating: 3 },
+    ];
+    expect(choiceStreak(recent)).toBe(0);
+    expect(choiceStreak(recent.slice(1))).toBe(2);
+    expect(choiceStreak([{ ...recent[0]!, rating: 3 }, ...recent.slice(1)])).toBe(2);
+    const card = { ...CARD, usageChoices: [CHOICE], frameChoices: [PICK, PICK], state: 2, stability: 2, recent };
+    expect(isAutoChecked(chooseTask(card).type)).toBe(true);
+  });
+
+  it('gives typing tasks, not multiple choice, when practicing words early', () => {
+    const card = { ...CARD, usageChoices: [CHOICE], frameChoices: [PICK, PICK], state: 2, stability: 2 };
+    expect(chooseTask(card, { extra: true }).type).toBe('frame');
+    expect(chooseTask({ ...card, frames: [] }, { extra: true }).type).toBe('scenario');
   });
 
   it('offers both sentences in a choice, in an order that varies by card', () => {
     const orders = ['a', 'b', 'c', 'd', 'e', 'f'].map(
-      (id) => chooseTask({ ...CARD, id, usageChoice: CHOICE, reps: 0, state: 2, stability: 2 }).options!,
+      (id) => chooseTask({ ...CARD, id, usageChoices: [CHOICE], reps: 0, state: 2, stability: 2 }).options!,
     );
     for (const options of orders) expect([...options].sort()).toEqual([CHOICE.correct, CHOICE.incorrect].sort());
     expect(new Set(orders.map((o) => o[0])).size).toBe(2);
@@ -101,7 +156,7 @@ describe('chooseTask', () => {
 
 describe('easierTask', () => {
   it('drops one level at a time to the easiest the word has', () => {
-    const card = { ...CARD, usageChoice: CHOICE, frameChoices: [PICK], state: 2, stability: 30 };
+    const card = { ...CARD, usageChoices: [CHOICE], frameChoices: [PICK], state: 2, stability: 30 };
     const open = chooseTask(card);
     const scenario = easierTask(card, open)!;
     const frame = easierTask(card, scenario)!;
@@ -125,6 +180,15 @@ describe('hintSteps', () => {
       { label: 'Example', text: 'It was egregious.', cap: 'Solid' },
       { label: 'Start with', text: 'The call was…', cap: 'Shaky' },
     ]);
+  });
+
+  it("skips the starter on a fill-in-the-blank task, which already gives the start", () => {
+    const frame = { type: 'frame' as const, prompt: 'The strong winds began to buffet ___' };
+    expect(hintSteps(CARD, frame).map((s) => s.label)).toEqual(['Goes with', 'Example']);
+    const open = { type: 'open' as const, prompt: 'Write a sentence using "egregious".' };
+    expect(hintSteps(CARD, open).map((s) => s.label)).toEqual(['Goes with', 'Example', 'Start with']);
+    const repeats = { type: 'scenario' as const, prompt: 'The call was... Tell your friend.' };
+    expect(hintSteps(CARD, repeats).map((s) => s.label)).toEqual(['Goes with', 'Example']);
   });
 
   it('caps by position, matching how the grader counts hints', () => {
@@ -160,7 +224,7 @@ function fakeClient({ due = 1, reviewedToday = 0, row = null as unknown, error =
       },
       maybeSingle: () => Promise.resolve({ data: row, error }),
     };
-    for (const name of ['select', 'is', 'lte', 'gte', 'or', 'not', 'order', 'limit']) {
+    for (const name of ['select', 'eq', 'is', 'lte', 'gte', 'or', 'not', 'order', 'limit']) {
       builder[name] = (...args: unknown[]) => {
         own.push([name, ...args]);
         calls.push([name, ...args]);
@@ -189,7 +253,7 @@ describe('fetchNextCard', () => {
         other_meanings: [{ part_of_speech: 'adjective', definition: 'remarkable (old use)' }, { definition: '' }],
         frames: CARD.frames,
         scenarios: CARD.scenarios,
-        usage_choice: null,
+        usage_choices: null,
         frame_choices: null,
         hint_partners: CARD.hints.partners,
         hint_example: CARD.hints.example,
@@ -204,6 +268,8 @@ describe('fetchNextCard', () => {
     expect(await fetchNextCard(client)).toEqual(CARD);
     expect(calls).toContainEqual(['order', 'due', { ascending: true }]);
     expect(calls).toContainEqual(['limit', 1]);
+    // Skips a word whose practice material isn't written yet.
+    expect(calls).toContainEqual(['eq', 'captures.senses.practice_ready', true]);
   });
 
   it('returns null without loading a card when today\'s cap is used up', async () => {
@@ -222,6 +288,7 @@ describe('fetchNextCard', () => {
     const { client, calls } = fakeClient({ due: 0, row: ROW });
 
     expect(await fetchExtraCard(client, new Date(), ['card-9', 'card-8'])).toEqual(CARD);
+    expect(calls).toContainEqual(['eq', 'captures.senses.practice_ready', true]);
     expect(calls).toContainEqual(['not', 'id', 'in', '(card-9,card-8)']);
     expect(calls).toContainEqual(['order', 'due', { ascending: true }]);
     expect(calls.some(([n, c]) => n === 'lte' && c === 'due')).toBe(false);
@@ -255,7 +322,7 @@ describe('submitAttempt', () => {
   it('sends the picked sentence for a choice, with no hints', async () => {
     const invoke = vi.fn().mockResolvedValue({ data: { attempt_id: 'a1' }, error: null });
     const client = { functions: { invoke } } as unknown as SupabaseClient;
-    const card = { ...CARD, usageChoice: CHOICE, reps: 0 };
+    const card = { ...CARD, usageChoices: [CHOICE], reps: 0 };
 
     await submitAttempt(client, card, chooseTask(card), CHOICE.correct, 2);
 

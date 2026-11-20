@@ -67,6 +67,7 @@ describe('captureWord', () => {
     expect(item).toEqual({
       word: ' laconic ',
       sentence: 'A laconic reply.',
+      previousSentence: null,
       pageTitle: null,
       sourceUrl: 'https://example.com',
       clientCaptureId: result.ok ? result.clientCaptureId : '',

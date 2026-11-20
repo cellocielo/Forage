@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getSelectionContext, sentenceAround } from './selection';
+import { getSelectionContext, lastSentence, sentenceAround, sentenceBefore } from './selection';
 
 describe('sentenceAround', () => {
   const text = 'First sentence here. The quick fox was laconic! Last one? Yes.';
@@ -26,6 +26,32 @@ describe('sentenceAround', () => {
   });
 });
 
+describe('sentenceBefore', () => {
+  const text = 'We tried a new method. This approach  worked well. Then we stopped.';
+
+  it('returns the sentence before the one at start', () => {
+    const start = text.indexOf('approach');
+    expect(sentenceBefore(text, start)).toBe('We tried a new method.');
+  });
+
+  it('is null for the first sentence', () => {
+    expect(sentenceBefore(text, text.indexOf('new'))).toBeNull();
+  });
+
+  it('keeps closing quotes', () => {
+    const quoted = 'She said "it\'s over." That ended it.';
+    expect(sentenceBefore(quoted, quoted.indexOf('ended'))).toBe('She said "it\'s over."');
+  });
+});
+
+describe('lastSentence', () => {
+  it('returns the last sentence, with or without a terminator', () => {
+    expect(lastSentence('One. Two is here.  ')).toBe('Two is here.');
+    expect(lastSentence('One. Two without end')).toBe('Two without end');
+    expect(lastSentence('   ')).toBeNull();
+  });
+});
+
 describe('getSelectionContext', () => {
   beforeEach(() => {
     document.title = 'Test page';
@@ -46,8 +72,28 @@ describe('getSelectionContext', () => {
     expect(getSelectionContext(window)).toEqual({
       word: 'ephemeral',
       sentence: 'Fame is ephemeral by nature.',
+      previousSentence: 'Intro text.',
       pageTitle: 'Test page',
       sourceUrl: window.location.href,
     });
+  });
+
+  it('takes the previous sentence from the paragraph before when the word opens one', () => {
+    document.body.innerHTML =
+      '<article><p>We used a new method. It was fast.</p><p>This <em>approach</em> worked.</p></article>';
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector('em')!);
+    window.getSelection()!.addRange(range);
+
+    expect(getSelectionContext(window)?.previousSentence).toBe('It was fast.');
+  });
+
+  it('has no previous sentence at the start of the first paragraph', () => {
+    document.body.innerHTML = '<article><h2>Methods</h2><p>This <em>approach</em> worked.</p></article>';
+    const range = document.createRange();
+    range.selectNodeContents(document.querySelector('em')!);
+    window.getSelection()!.addRange(range);
+
+    expect(getSelectionContext(window)?.previousSentence).toBeNull();
   });
 });

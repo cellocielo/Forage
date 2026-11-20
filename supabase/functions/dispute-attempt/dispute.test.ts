@@ -2,7 +2,7 @@ import { assert, assertEquals } from '@std/assert';
 import { Rating, State } from 'ts-fsrs';
 import { type CardRow, reviewCard } from '../_shared/scheduling.ts';
 import type { PracticeSense, Verdict } from '../grade-attempt/grade.ts';
-import { type AttemptToDispute, type DisputeDeps, disputeAttempt, taskForAttempt } from './dispute.ts';
+import { type AttemptToDispute, choiceQuestion, type DisputeDeps, disputeAttempt, taskForAttempt } from './dispute.ts';
 
 const REVIEWED_AT = '2026-11-03T09:00:00.000Z';
 
@@ -13,11 +13,13 @@ const SENSE: PracticeSense = {
   definition: 'Shockingly bad.',
   frames: ['It was so egregious that ___.'],
   scenarios: [{ register: 'formal', situation: 'Email the league office.' }],
-  usage_choice: {
-    correct: 'The referee made an egregious error.',
-    incorrect: 'The referee made an egregious call that delighted everyone.',
-    mistake: 'Egregious means shockingly bad.',
-  },
+  usage_choices: [
+    {
+      correct: 'The referee made an egregious error.',
+      incorrect: 'The referee made an egregious call that delighted everyone.',
+      mistake: 'Egregious means shockingly bad.',
+    },
+  ],
   frame_choices: [{ answer: 'I left', wrong: ['I cheered', 'I clapped'], why: 'Bad things make you leave.' }],
 };
 
@@ -56,6 +58,7 @@ const verdict = (score: number): Verdict => ({
   corrected_sentence: 'The call was egregious.',
   rationale: 'Clear and fitting.',
   score,
+  unsure: false,
 });
 
 function fakeDeps({
@@ -144,7 +147,7 @@ Deno.test('disputes are refused for missing, already disputed, already right, or
     [{ ...ATTEMPT, sense: null }, 404],
     [{ ...ATTEMPT, disputed_at: REVIEWED_AT }, 409],
     [{ ...ATTEMPT, task_type: 'choice', rating: Rating.Good }, 400],
-    [{ ...ATTEMPT, task_type: 'choice', rating: Rating.Again, sense: { ...SENSE, usage_choice: null } }, 409],
+    [{ ...ATTEMPT, task_type: 'choice', rating: Rating.Again, sense: { ...SENSE, usage_choices: [null] } }, 409],
   ];
   for (const [attempt, status] of cases) {
     const { deps, opinions } = fakeDeps({ attempt });
@@ -165,8 +168,8 @@ const WRONG_CHOICE: AttemptToDispute = {
   ...ATTEMPT,
   task_type: 'choice',
   prompt: 'Which sentence uses "egregious" correctly?',
-  answer: SENSE.usage_choice!.incorrect,
-  sentence: SENSE.usage_choice!.incorrect,
+  answer: SENSE.usage_choices![0]!.incorrect,
+  sentence: SENSE.usage_choices![0]!.incorrect,
   rating: Rating.Again,
 };
 
@@ -178,9 +181,9 @@ Deno.test('a disputed choice that holds up counts as right, reschedules, and ret
   assert(outcome.ok);
   assertEquals([outcome.rating, outcome.changed, outcome.rescheduled], [Rating.Good, true, true]);
   assertEquals(opinions[0]!.slice(2), [
-    [SENSE.usage_choice!.correct, SENSE.usage_choice!.incorrect],
-    SENSE.usage_choice!.correct,
-    SENSE.usage_choice!.incorrect,
+    [SENSE.usage_choices![0]!.correct, SENSE.usage_choices![0]!.incorrect],
+    SENSE.usage_choices![0]!.correct,
+    SENSE.usage_choices![0]!.incorrect,
   ]);
   assertEquals(resolved[0]![3], reviewCard(BEFORE, Rating.Good, new Date(REVIEWED_AT)).card);
   assertEquals(retired, [['sense-1', 'choice', 0]]);
@@ -192,7 +195,7 @@ Deno.test('a disputed choice that does not hold up stays wrong and keeps the que
   const outcome = await disputeAttempt(REQUEST, deps);
 
   assert(outcome.ok);
-  assertEquals([outcome.rating, outcome.changed, outcome.verdict.corrected_sentence], [Rating.Again, false, SENSE.usage_choice!.correct]);
+  assertEquals([outcome.rating, outcome.changed, outcome.verdict.corrected_sentence], [Rating.Again, false, SENSE.usage_choices![0]!.correct]);
   assertEquals(resolved[0]![3], null);
   assertEquals(retired.length, 0);
 });
@@ -216,4 +219,13 @@ Deno.test('a disputed pick is judged as full sentences and retires only that fra
     'It was so egregious that I clapped.',
   ]);
   assertEquals(retired, [['sense-1', 'pick', 0]]);
+});
+
+Deno.test('choiceQuestion finds the pair the picked sentence came from', () => {
+  const second = { correct: 'The fee was egregious.', incorrect: 'The egregious gift made her smile.', mistake: 'Egregious is bad.' };
+  const sense = { ...SENSE, usage_choices: [null, second] };
+  const attempt = { ...WRONG_CHOICE, answer: second.incorrect, sentence: second.incorrect };
+
+  assertEquals(choiceQuestion(attempt, sense), { index: 1, options: [second.correct, second.incorrect], keyed: second.correct });
+  assertEquals(choiceQuestion(WRONG_CHOICE, sense), null);
 });

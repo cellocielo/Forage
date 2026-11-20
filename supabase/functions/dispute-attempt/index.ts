@@ -43,7 +43,7 @@ Deno.serve(
         if (data.sense_id) {
           const { data: row, error: senseError } = await ctx.supabaseAdmin
             .from('senses')
-            .select('id, part_of_speech, definition, frames, scenarios, usage_choice, frame_choices, lemmas ( lemma )')
+            .select('id, part_of_speech, definition, frames, scenarios, usage_choices, frame_choices, lemmas ( lemma )')
             .eq('id', data.sense_id)
             .maybeSingle();
           if (senseError) throw new Error(senseError.message);
@@ -84,16 +84,13 @@ Deno.serve(
         generateChoiceReview(anthropic, model, sense, prompt, options, keyed, picked),
       async retireQuestion(senseId, type, index) {
         // Senses are shared through the enrichment cache, so this fixes the question for everyone.
-        if (type === 'choice') {
-          const { error } = await ctx.supabaseAdmin.from('senses').update({ usage_choice: null }).eq('id', senseId);
-          if (error) throw new Error(error.message);
-          return;
-        }
-        const { data, error } = await ctx.supabaseAdmin.from('senses').select('frame_choices').eq('id', senseId).single();
+        // Set to null rather than removed, so the other questions keep their indexes.
+        const column = type === 'choice' ? 'usage_choices' : 'frame_choices';
+        const { data, error } = await ctx.supabaseAdmin.from('senses').select(column).eq('id', senseId).single();
         if (error) throw new Error(error.message);
-        const choices = [...((data.frame_choices as unknown[] | null) ?? [])];
+        const choices = [...(((data as Record<string, unknown>)[column] as unknown[] | null) ?? [])];
         choices[index] = null;
-        const { error: updateError } = await ctx.supabaseAdmin.from('senses').update({ frame_choices: choices }).eq('id', senseId);
+        const { error: updateError } = await ctx.supabaseAdmin.from('senses').update({ [column]: choices }).eq('id', senseId);
         if (updateError) throw new Error(updateError.message);
       },
       async resolve(attempt, verdict, rating, newCard, expectedReps) {

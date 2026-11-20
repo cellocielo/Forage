@@ -32,7 +32,7 @@ function fakeClient({
         return Promise.resolve(isDue ? due : reviewedToday).then(resolve, reject);
       },
     } as Record<string, unknown>;
-    for (const name of ['select', 'is', 'lte', 'gte', 'or']) {
+    for (const name of ['select', 'eq', 'is', 'lte', 'gte', 'or']) {
       builder[name] = (...args: unknown[]) => {
         calls.push([name, ...args]);
         return builder;
@@ -64,7 +64,8 @@ describe('countReadyWords', () => {
     const iso = now.toISOString();
     expect(dueQuery).toEqual([
       ['from', 'cards'],
-      ['select', 'id', { count: 'exact', head: true }],
+      ['select', 'id, captures!inner ( senses!inner ( practice_ready ) )', { count: 'exact', head: true }],
+      ['eq', 'captures.senses.practice_ready', true],
       ['is', 'archived_at', null],
       ['lte', 'due', iso],
       ['or', `snoozed_until.is.null,snoozed_until.lte."${iso}"`],
